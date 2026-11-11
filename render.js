@@ -135,7 +135,7 @@ function preserveAngleTags(raw, delimiters) {
     return raw;
 }
 
-export async function renderMessage(message, { rendered, format, sanitize, imageGroups, delimiters, normalize, gallery, assets, stats, signal, regexFilter }) {
+async function prepareMarkup(message, { rendered, format, delimiters, signal, regexFilter }) {
     signal?.throwIfAborted();
     const originalLive = rendered.get(message.index);
     const originalRaw = message.mes;
@@ -159,14 +159,39 @@ export async function renderMessage(message, { rendered, format, sanitize, image
             }
         }
     } catch { markup ??= null; }
+    return { markup, plain: stripImageWrapper(raw), originalRaw, raw, originalLive, live, originalMarkup, filtered };
+}
+
+export async function previewMessage(message, options) {
+    const { markup, plain } = await prepareMarkup(message, options);
+    if (markup === null) return plain;
+    const fragment = options.sanitize(markup, SANITIZE);
+    const doc = fragment.ownerDocument;
+    for (const media of fragment.querySelectorAll(`[${TAG}], img, video`)) {
+        if (fragment.contains(media)) media.replaceWith(doc.createTextNode('〔插图〕'));
+    }
+    for (const node of fragment.querySelectorAll('p, div, section, li, blockquote, pre, h1, h2, h3, h4, h5, h6, br')) {
+        node.after(doc.createTextNode('\n'));
+    }
+    let text = fragment.textContent ?? '';
+    for (const match of splitTags(text, options.delimiters.start, options.delimiters.end).reverse()) {
+        if (options.delimiters.start === '[' && options.delimiters.end === ']') break;
+        text = text.slice(0, match.start) + '〔插图〕' + text.slice(match.end);
+    }
+    return text.trim();
+}
+
+export async function renderMessage(message, options) {
+    const { sanitize, imageGroups, delimiters, normalize, gallery, assets, stats } = options;
+    const { markup, plain, originalRaw, raw, originalLive, live, originalMarkup, filtered } = await prepareMarkup(message, options);
     const fragment = sanitize(markup ?? '', SANITIZE);
     const doc = fragment.ownerDocument;
     const root = doc.createElement('div');
     root.append(fragment);
     if (markup === null) {
-        const plain = doc.createElement('pre');
-        plain.textContent = stripImageWrapper(raw);
-        root.append(plain);
+        const pre = doc.createElement('pre');
+        pre.textContent = plain;
+        root.append(pre);
     }
     safeLinks(root);
     for (const node of root.querySelectorAll('[class]')) {

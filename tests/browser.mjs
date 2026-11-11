@@ -11,7 +11,7 @@ const staticFiles = new Map([
     ['/', ['tests/fixture.html', 'text/html; charset=utf-8']],
     ['/fixture.js', ['tests/fixture.js', 'text/javascript; charset=utf-8']],
     ['/dompurify.mjs', ['node_modules/dompurify/dist/purify.es.mjs', 'text/javascript']],
-    ...['index.js', 'document.js', 'render.js', 'model.js', 'chatu8.js', 'assets.js', 'regex-filter.js', 'regex-worker.js', 'style.css']
+    ...['index.js', 'document.js', 'render.js', 'model.js', 'chatu8.js', 'assets.js', 'regex-filter.js', 'regex-worker.js', 'organizer.js', 'tags.js', 'style.css']
         .map(file => [prefix + file, [file, file.endsWith('.css') ? 'text/css' : 'text/javascript; charset=utf-8']]),
 ]);
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ3sAAAAASUVORK5CYII=', 'base64');
@@ -97,7 +97,31 @@ try {
     assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
     await includeUser.check();
 
-    const regexToggle = page.getByRole('checkbox', { name: '用正则移除导出内容' });
+    const beforePreview = requests.filter(request => request.startsWith('/user/images/')).length;
+    await page.getByRole('button', { name: '内容整理' }).click();
+    const previewIndex = page.getByRole('spinbutton', { name: '原聊天消息编号' });
+    await previewIndex.fill('2');
+    const thinkAction = page.getByRole('combobox', { name: '处理 <think>', exact: true });
+    const optionsAction = page.getByRole('combobox', { name: '处理 <options>', exact: true });
+    await thinkAction.selectOption('remove');
+    await optionsAction.selectOption('remove');
+    await page.waitForFunction(() => {
+        const text = document.querySelector('.sthe-preview-list').textContent;
+        return text.includes('前文') && text.includes('〔插图〕') && !text.includes('原文思考') && !text.includes('原文选项');
+    });
+    assert.equal(requests.filter(request => request.startsWith('/user/images/')).length, beforePreview);
+    assert.ok(await page.locator('.sthe-dialog').evaluate(dialog => dialog.scrollWidth <= dialog.clientWidth + 1));
+    await page.locator('.sthe-dialog').evaluate(dialog => { dialog.scrollTop = 0; });
+    await page.screenshot({ path: path.join(results, 'organizer-mobile.png') });
+    await page.getByRole('button', { name: '生成 HTML' }).click();
+    await filteredLink.waitFor({ timeout: 12000 });
+    const tagCleaned = await filteredLink.evaluate(async link => (await fetch(link.href)).text());
+    assert.ok(!tagCleaned.includes('原文思考') && !tagCleaned.includes('原文选项'));
+    assert.ok(tagCleaned.includes(expected[1]));
+    await thinkAction.selectOption('');
+    await optionsAction.selectOption('');
+
+    const regexToggle = page.getByRole('checkbox', { name: '使用自定义正则' });
     assert.equal(await regexToggle.isChecked(), false);
     await regexToggle.check();
     const editor = page.getByRole('textbox', { name: '要移除的内容' });
@@ -106,17 +130,23 @@ try {
     await page.getByRole('button', { name: '生成 HTML' }).click();
     assert.match(await page.getByRole('status').textContent(), /第 1 行的正则表达式或标志无效/);
     await editor.fill(exampleRules + '\n/第 13 条消息/g');
+    await page.getByRole('button', { name: '添加替换' }).click();
+    await page.getByRole('textbox', { name: '查找表达式' }).fill('/前文/g');
+    await page.getByRole('textbox', { name: '替换为' }).fill('雨夜开场');
+    await page.getByRole('textbox', { name: '只保留匹配内容' }).fill('/第 14/g\n/14 条/g');
     await page.getByRole('button', { name: '生成 HTML' }).click();
     await filteredLink.waitFor({ timeout: 12000 });
     const cleaned = await filteredLink.evaluate(async link => (await fetch(link.href)).text());
     for (const removed of ['原文思考', '第二行思考', '原文选项', '页面选项', '第 13 条消息']) {
         assert.ok(!cleaned.includes(removed), removed);
     }
-    assert.ok(cleaned.includes('前文') && cleaned.includes('嵌入状态栏'));
+    assert.ok(cleaned.includes('雨夜开场') && cleaned.includes('嵌入状态栏'));
+    assert.ok(!cleaned.includes('第 14 条消息') && cleaned.includes('第 14 条'));
     assert.ok(cleaned.includes(expected[0]) && cleaned.includes(expected[1]));
     assert.match(await page.getByRole('status').textContent(), /32 条消息、9 项媒体/);
     assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
     await regexToggle.uncheck();
+    await page.getByRole('button', { name: '导出设置' }).click();
 
     // An export can be cancelled while waiting for a slow image.
     await page.evaluate(() => {

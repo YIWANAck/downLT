@@ -3,14 +3,13 @@ import { chatIdentity, md5, messagePrefixHashes, snapshotChat } from './model.js
 import { captureRenderedMessages } from './render.js';
 import { buildArchiveParts } from './document.js';
 import { describeMediaFailures } from './assets.js';
-import { createRegexFilter, parseRemovalRules, RegexFilterError } from './regex-filter.js';
+import { createRegexFilter, RegexFilterError } from './regex-filter.js';
+import { createOrganizer, element } from './organizer.js';
 
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
 const INCLUDE_USER_SETTING = 'st-html-export.include-user';
-const REGEX_RULES_SETTING = 'st-html-export.regex-rules';
-const EXAMPLE_RULES = String.raw`/<(think|thinking)\b[^>]*>[\s\S]*?<\/\1\s*>/gi
-/<(options|choices)\b[^>]*>[\s\S]*?<\/\1\s*>/gi`;
+class ExportSelectionError extends Error {}
 
 function progressKey(identity, includeUser) {
     return identity && `st-html-export.progress.v1:${md5(JSON.stringify([identity, includeUser]))}`;
@@ -25,11 +24,12 @@ function readProgress(key) {
     return null;
 }
 
-function element(tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text) node.textContent = text;
-    return node;
+function formatMessage(context, raw, message) {
+    // ST can write expanded greeting macros back into message zero when its ID is supplied.
+    const first = message.index === 0;
+    const value = first && !message.is_user && !message.is_system
+        ? (context.substituteParams?.(raw, undefined, message.name) ?? raw) : raw;
+    return context.messageFormatting(value, message.name, message.is_system, message.is_user, first ? undefined : message.index);
 }
 
 function install() {
@@ -79,21 +79,15 @@ function install() {
     const external = element('input');
     external.type = 'checkbox';
     option.append(external, '尝试保存聊天中的外链图片（会访问图片网站）');
-    const regexOption = element('label', 'sthe-option');
-    const regexEnabled = element('input');
-    regexEnabled.type = 'checkbox';
-    regexOption.append(regexEnabled, '用正则移除导出内容');
-    const regexFields = element('div', 'sthe-regex-fields');
-    regexFields.hidden = true;
-    const ruleLabel = element('label', null, '要移除的内容');
-    const ruleEditor = element('textarea');
-    ruleEditor.rows = 4;
-    ruleEditor.spellcheck = false;
-    ruleEditor.value = EXAMPLE_RULES;
-    try { ruleEditor.value = localStorage.getItem(REGEX_RULES_SETTING) ?? EXAMPLE_RULES; }
-    catch { /* Use the examples when storage is disabled. */ }
-    ruleLabel.append(ruleEditor);
-    regexFields.append(ruleLabel, element('small', null, '每行一条 /表达式/标志。初始规则匹配 <think>、<thinking>、<options> 和 <choices> 块。'));
+    const nav = element('nav', 'sthe-nav');
+    nav.setAttribute('aria-label', '导出面板');
+    const exportTab = element('button', 'menu_button', '导出设置');
+    const organizeTab = element('button', 'menu_button', '内容整理');
+    exportTab.type = organizeTab.type = 'button';
+    nav.append(exportTab, organizeTab);
+    const exportPanel = element('section', 'sthe-panel sthe-export-panel');
+    const cleanupStatus = element('p', 'sthe-cleanup-status');
+    exportPanel.append(info, userOption, resumeOption, resumeFields, splitOption, option, cleanupStatus);
     const progress = element('progress', 'sthe-progress');
     progress.hidden = true;
     progress.setAttribute('aria-label', '导出进度');
@@ -110,7 +104,39 @@ function install() {
     next.type = 'button';
     next.hidden = true;
     actions.append(start, cancel, download, next);
-    dialog.append(header, info, userOption, resumeOption, resumeFields, splitOption, option, regexOption, regexFields, progress, status, actions);
+    const organizer = createOrganizer({
+        selection: () => {
+            const context = getContext();
+            const snapshot = selectMessages(context);
+            const settings = context.extensionSettings?.['st-chatu8'] || {};
+            return {
+                messages: snapshot.messages,
+                format: (raw, message) => formatMessage(context, raw, message),
+                sanitize: (html, config) => sanitizer.sanitize(html, config),
+                delimiters: { start: settings.startTag || 'image###', end: settings.endTag || '###' },
+            };
+        },
+        getChatKey: () => {
+            const id = chatIdentity(getContext());
+            return id && `st-html-export.tag-actions:${md5(id)}`;
+        },
+        onChange: () => { clearResult(); status.textContent = ''; updateCleanupStatus(); },
+    });
+    function updateCleanupStatus() {
+        const summary = organizer.summary();
+        cleanupStatus.textContent = summary ? `导出时应用：${summary}` : '';
+    }
+    function selectPanel(organize) {
+        exportPanel.hidden = organize;
+        organizer.panel.hidden = !organize;
+        exportTab.setAttribute('aria-pressed', String(!organize));
+        organizeTab.setAttribute('aria-pressed', String(organize));
+        if (organize) organizer.open();
+        else { organizer.close(); updateCleanupStatus(); }
+    }
+    exportTab.addEventListener('click', () => selectPanel(false));
+    organizeTab.addEventListener('click', () => selectPanel(true));
+    dialog.append(header, nav, exportPanel, organizer.panel, progress, status, actions);
     document.body.append(dialog);
 
     let controller = null;
@@ -132,6 +158,27 @@ function install() {
         resumeHint.textContent = saved
             ? `已记录到原聊天第 ${saved.end} 条。留空从第 ${saved.end + 1} 条开始。`
             : '当前聊天没有可用的下载进度。旧版导过的话，可以填下一条消息的编号，从 1 开始数，包含你发的消息。';
+    }
+
+    function selectMessages(context, hashes) {
+        if (!context.chat?.length) throw new ExportSelectionError('请先打开一段聊天。');
+        let startIndex = 0;
+        if (resume.checked) {
+            if (from.validity.badInput || (from.value !== '' && (!Number.isSafeInteger(from.valueAsNumber) || from.valueAsNumber < 1 || from.valueAsNumber > context.chat.length))) {
+                throw new ExportSelectionError(`请输入 1 到 ${context.chat.length} 之间的消息编号。`);
+            }
+            if (from.value !== '') startIndex = from.valueAsNumber - 1;
+            else {
+                const saved = readProgress(progressKey(chatIdentity(context), includeUser.checked));
+                if (!saved) throw new ExportSelectionError('还没有这段聊天的下载进度。请填写起点，或取消勾选后完整导出。');
+                const current = hashes ?? messagePrefixHashes(context.chat);
+                if (current[saved.end] !== saved.hash) throw new ExportSelectionError('上次导出前的消息有变动。请填写起点，或取消勾选后完整导出。');
+                startIndex = saved.end;
+            }
+        }
+        const snapshot = snapshotChat(context, { includeUser: includeUser.checked, startIndex });
+        if (!snapshot.messages.length) throw new ExportSelectionError(resume.checked ? '没有符合当前选项的新消息。' : '没有符合当前选项的消息。');
+        return snapshot;
     }
 
     download.addEventListener('click', () => recordDownload?.());
@@ -168,20 +215,10 @@ function install() {
     });
     from.addEventListener('input', () => { clearResult(); status.textContent = ''; });
     split.addEventListener('change', () => { clearResult(); status.textContent = ''; });
-    regexEnabled.addEventListener('change', () => {
-        regexFields.hidden = !regexEnabled.checked;
-        clearResult();
-        status.textContent = '';
-    });
-    ruleEditor.addEventListener('input', () => {
-        clearResult();
-        status.textContent = '';
-        try { localStorage.setItem(REGEX_RULES_SETTING, ruleEditor.value); }
-        catch { /* The current rules remain available in the editor. */ }
-    });
     close.addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => {
         controller?.abort();
+        organizer.close();
         clearResult(30000);
     });
     cancel.addEventListener('click', () => controller?.abort());
@@ -193,7 +230,8 @@ function install() {
         controller = new AbortController();
         const { signal } = controller;
         start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = true;
-        regexEnabled.disabled = ruleEditor.disabled = true;
+        exportTab.disabled = organizeTab.disabled = true;
+        organizer.setBusy(true);
         progress.hidden = cancel.hidden = false;
         progress.value = 0;
         status.textContent = '正在读取消息和图片…';
@@ -204,43 +242,19 @@ function install() {
         if (subscribe) context.eventSource.on(chatChanged, changed);
         let regexFilter;
         try {
-            const rules = regexEnabled.checked ? parseRemovalRules(ruleEditor.value) : null;
+            const { rules, tags } = organizer.filters();
             const key = progressKey(identity, includeUser.checked);
             const hashes = key ? messagePrefixHashes(context.chat) : [];
             const resumeExport = resume.checked;
-            let startIndex = 0;
-            if (resumeExport) {
-                if (from.validity.badInput || (from.value !== '' && (!Number.isSafeInteger(from.valueAsNumber) || from.valueAsNumber < 1 || from.valueAsNumber > context.chat.length))) {
-                    status.textContent = `请输入 1 到 ${context.chat.length} 之间的消息编号。`;
-                    return;
-                }
-                if (from.value !== '') startIndex = from.valueAsNumber - 1;
-                else {
-                    const saved = readProgress(key);
-                    if (!saved || hashes[saved.end] !== saved.hash) {
-                        status.textContent = saved ? '上次导出前的消息有变动。请填写起点，或取消勾选后完整导出。' : '还没有这段聊天的下载进度。请填写起点，或取消勾选后完整导出。';
-                        return;
-                    }
-                    startIndex = saved.end;
-                }
-            }
-            const snapshot = snapshotChat(context, { includeUser: includeUser.checked, startIndex });
-            if (!snapshot.messages.length) { status.textContent = resumeExport ? '没有符合当前选项的新消息。' : '没有符合当前选项的消息。'; return; }
+            const snapshot = selectMessages(context, hashes);
             progress.max = snapshot.messages.length;
             const rendered = captureRenderedMessages(document.getElementById('chat'), new Set(snapshot.messages.map(message => message.index)));
             const settings = context.extensionSettings?.['st-chatu8'] || {};
             const splitExport = split.checked;
-            if (rules) regexFilter = createRegexFilter(rules, signal);
+            if (rules.length || Object.keys(tags).length) regexFilter = createRegexFilter(rules, signal, tags);
             for await (const result of buildArchiveParts(snapshot, {
                 rendered,
-                format: (raw, message) => {
-                    // ST's formatter can save macro substitutions into message zero.
-                    // Supply the expanded greeting and omit its ID to keep this export read-only.
-                    const first = message.index === 0;
-                    const value = first && !message.is_user && !message.is_system
-                        ? (context.substituteParams?.(raw, undefined, message.name) ?? raw) : raw;
-                    return context.messageFormatting(value, message.name, message.is_system, message.is_user, first ? undefined : message.index);
-                },
+                format: (raw, message) => formatMessage(context, raw, message),
                 sanitize: (html, config) => sanitizer.sanitize(html, config),
                 settings,
                 substitute: value => value.includes('{{') ? (context.substituteParams?.(value) ?? value) : value,
@@ -290,7 +304,7 @@ function install() {
         } catch (error) {
             clearResult(3000);
             if (signal.aborted) status.textContent = '已取消导出。';
-            else if (error instanceof RegexFilterError) status.textContent = error.message;
+            else if (error instanceof RegexFilterError || error instanceof ExportSelectionError) status.textContent = error.message;
             else status.textContent = '导出未完成。请刷新酒馆后重试。';
             if (!signal.aborted) console.warn('[ST HTML Export] Export failed:', error?.name || 'Error');
         } finally {
@@ -298,7 +312,8 @@ function install() {
             if (subscribe) context.eventSource.removeListener(chatChanged, changed);
             controller = null;
             start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = false;
-            regexEnabled.disabled = ruleEditor.disabled = false;
+            exportTab.disabled = organizeTab.disabled = false;
+            organizer.setBusy(false);
             progress.hidden = cancel.hidden = true;
         }
     });
@@ -309,6 +324,7 @@ function install() {
             resume.checked = false;
             resumeFields.hidden = true;
             from.value = '';
+            selectPanel(false);
         }
         if (!dialog.open) dialog.showModal();
     }
