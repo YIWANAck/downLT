@@ -66,6 +66,8 @@ export function createAssetLoader({ base = location.href, external = false, sign
     return {
         get embeddedBytes() { return embeddedBytes; },
         get limitReached() { return limitReached; },
+        resetBudget() { embeddedBytes = 0; limitReached = false; },
+        clearCache() { cache.clear(); },
         async embed(source, key) {
             signal?.throwIfAborted();
             const url = source instanceof Blob ? null : mediaUrl(source, base, external);

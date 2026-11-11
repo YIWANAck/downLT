@@ -1,6 +1,6 @@
 import { normalizeTag } from './model.js';
 import { openChatu8 } from './chatu8.js';
-import { createAssetLoader } from './assets.js';
+import { createAssetLoader, MAX_EMBEDDED } from './assets.js';
 import { renderMessage } from './render.js';
 
 export const archiveCss = `
@@ -36,24 +36,64 @@ export function wrapArchive(title, articles, stats, timestamp = new Date()) {
     return new Blob([head, ...articles, '<footer>离线聊天记录 · SillyTavern</footer></main></body></html>'], { type: 'text/html;charset=utf-8' });
 }
 
-export async function buildArchive(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, base, maxEmbedded }) {
+const newStats = () => ({ embedded: 0, missing: 0, moved: 0, limitReached: false });
+
+export async function* buildArchiveParts(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, base, maxEmbedded = MAX_EMBEDDED, split = false }) {
     const gallery = await openChatu8(settings, signal);
     const assets = createAssetLoader({ base, external, signal, maxEmbedded });
-    const stats = { embedded: 0, missing: 0, moved: 0, limitReached: false };
     const delimiters = { start: settings.startTag || 'image###', end: settings.endTag || '###' };
     const normalize = value => normalizeTag(value, substitute);
-    const articles = [];
+    const timestamp = new Date();
+    const total = snapshot.messages.length;
+    let articles = [];
+    let stats = newStats();
+    let partBytes = 0;
+    let done = 0;
+    let part = 1;
+
+    function finishPart(more) {
+        const title = split ? `${snapshot.title} · 第 ${part} 段` : snapshot.title;
+        const filename = fileName(snapshot.title);
+        const suffix = String(part).padStart(3, '0');
+        return {
+            blob: wrapArchive(title, articles, stats, timestamp),
+            filename: split ? `${filename.slice(0, -5)}-${suffix}.html` : filename,
+            part, more, done, total, count: articles.length, stats,
+        };
+    }
+
     try {
         for (const message of snapshot.messages) {
             signal?.throwIfAborted();
-            const body = await renderMessage(message, { rendered, format, sanitize, imageGroups: snapshot.imageGroups, delimiters, normalize, gallery, assets, stats, signal });
-            articles.push(`<article class="message${message.is_user ? ' mine' : ''}"><header><span class="speaker">${escapeHtml(message.name)}</span>${message.date ? `<span class="time">${escapeHtml(message.date)}</span>` : ''}</header><div class="body">${body}</div></article>`);
-            onProgress({ done: articles.length, total: snapshot.messages.length, bytes: assets.embeddedBytes });
+            if (split) assets.resetBudget();
+            const messageStats = newStats();
+            const body = await renderMessage(message, { rendered, format, sanitize, imageGroups: snapshot.imageGroups, delimiters, normalize, gallery, assets, stats: messageStats, signal });
+            if (split) rendered.delete(message.index);
+            const article = `<article class="message${message.is_user ? ' mine' : ''}"><header><span class="speaker">${escapeHtml(message.name)}</span>${message.date ? `<span class="time">${escapeHtml(message.date)}</span>` : ''}</header><div class="body">${body}</div></article>`;
+            const bytes = assets.embeddedBytes;
+            if (split && articles.length && partBytes + bytes > maxEmbedded) {
+                // Keep the boundary message intact in the next part, including any media already read.
+                const finished = finishPart(true);
+                articles = [];
+                stats = newStats();
+                partBytes = 0;
+                assets.clearCache();
+                yield finished;
+                signal?.throwIfAborted();
+                part++;
+            }
+            articles.push(article);
+            stats.embedded += messageStats.embedded;
+            stats.missing += messageStats.missing;
+            stats.moved += messageStats.moved;
+            stats.limitReached ||= assets.limitReached;
+            partBytes = split ? partBytes + bytes : bytes;
+            done++;
+            onProgress({ done, total });
             // Keep the mobile cancel button and progress indicator responsive on text-heavy chats.
-            if (articles.length % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+            if (done % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
         }
         signal?.throwIfAborted();
-        stats.limitReached = assets.limitReached;
-        return { blob: wrapArchive(snapshot.title, articles, stats), stats };
+        yield finishPart(false);
     } finally { gallery.close(); }
 }

@@ -1,7 +1,7 @@
 import { DOMPurify } from '../../../../lib.js';
 import { snapshotChat } from './model.js';
 import { captureRenderedMessages } from './render.js';
-import { buildArchive, fileName } from './document.js';
+import { buildArchiveParts } from './document.js';
 
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
@@ -38,6 +38,10 @@ function install() {
     try { includeUser.checked = localStorage.getItem(INCLUDE_USER_SETTING) !== 'false'; }
     catch { /* Storage may be disabled. */ }
     userOption.append(includeUser, '包含我的消息');
+    const splitOption = element('label', 'sthe-option');
+    const split = element('input');
+    split.type = 'checkbox';
+    splitOption.append(split, '自动分段导出（适合图片较多的聊天）');
     const option = element('label', 'sthe-option');
     const external = element('input');
     external.type = 'checkbox';
@@ -54,8 +58,11 @@ function install() {
     cancel.hidden = true;
     const download = element('a', 'menu_button sthe-download', '下载 HTML');
     download.hidden = true;
-    actions.append(start, cancel, download);
-    dialog.append(header, info, userOption, option, progress, status, actions);
+    const next = element('button', 'menu_button', '生成下一段');
+    next.type = 'button';
+    next.hidden = true;
+    actions.append(start, cancel, download, next);
+    dialog.append(header, info, userOption, splitOption, option, progress, status, actions);
     document.body.append(dialog);
 
     let controller = null;
@@ -67,8 +74,26 @@ function install() {
             else URL.revokeObjectURL(oldUrl);
         }
         resultUrl = null;
-        download.hidden = true;
+        download.hidden = next.hidden = true;
         download.removeAttribute('href');
+    }
+    function waitForNextPart(signal) {
+        signal.throwIfAborted();
+        return new Promise((resolve, reject) => {
+            const enableNext = () => { next.disabled = false; };
+            const cleanup = () => {
+                download.removeEventListener('click', enableNext);
+                next.removeEventListener('click', proceed);
+                signal.removeEventListener('abort', abort);
+            };
+            const proceed = () => { cleanup(); resolve(); };
+            const abort = () => { cleanup(); reject(signal.reason); };
+            next.disabled = true;
+            next.hidden = false;
+            download.addEventListener('click', enableNext, { once: true });
+            next.addEventListener('click', proceed, { once: true });
+            signal.addEventListener('abort', abort, { once: true });
+        });
     }
     includeUser.addEventListener('change', () => {
         try { localStorage.setItem(INCLUDE_USER_SETTING, String(includeUser.checked)); }
@@ -76,6 +101,7 @@ function install() {
         clearResult();
         status.textContent = '';
     });
+    split.addEventListener('change', () => { clearResult(); status.textContent = ''; });
     close.addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => {
         controller?.abort();
@@ -89,7 +115,7 @@ function install() {
         clearResult();
         controller = new AbortController();
         const { signal } = controller;
-        start.disabled = includeUser.disabled = external.disabled = true;
+        start.disabled = includeUser.disabled = split.disabled = external.disabled = true;
         progress.hidden = cancel.hidden = false;
         progress.value = 0;
         status.textContent = '正在读取消息和图片…';
@@ -105,7 +131,8 @@ function install() {
             progress.max = snapshot.messages.length;
             const rendered = captureRenderedMessages(document.getElementById('chat'));
             const settings = context.extensionSettings?.['st-chatu8'] || {};
-            const { blob, stats } = await buildArchive(snapshot, {
+            const splitExport = split.checked;
+            for await (const result of buildArchiveParts(snapshot, {
                 rendered,
                 format: (raw, message) => {
                     // ST's formatter can save macro substitutions into message zero.
@@ -119,31 +146,43 @@ function install() {
                 settings,
                 substitute: value => value.includes('{{') ? (context.substituteParams?.(value) ?? value) : value,
                 external: external.checked,
+                split: splitExport,
                 signal,
                 onProgress({ done, total }) {
                     changed();
                     progress.value = done;
                     status.textContent = `已处理 ${done} / ${total} 条消息…`;
                 },
-            });
-            signal.throwIfAborted();
-            resultUrl = URL.createObjectURL(blob);
-            download.href = resultUrl;
-            download.download = fileName(snapshot.title);
-            download.hidden = false;
-            const size = blob.size >= 1048576 ? `${(blob.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(blob.size / 1024))} KB`;
-            status.textContent = `已生成 ${snapshot.messages.length} 条消息、${stats.embedded} 项媒体（${size}）。`
-                + (stats.missing ? ` ${stats.missing} 项媒体未能保存，已在档案中标记。` : '')
-                + (stats.moved ? ` ${stats.moved} 项插图移至对应消息末尾。` : '')
-                + (stats.limitReached ? ' 已达单文件图片大小上限。' : '');
-            download.focus();
+            })) {
+                signal.throwIfAborted();
+                const { blob, stats, part, count, done, total, more, filename } = result;
+                resultUrl = URL.createObjectURL(blob);
+                download.href = resultUrl;
+                download.download = filename;
+                download.textContent = splitExport ? `下载第 ${part} 段` : '下载 HTML';
+                download.hidden = false;
+                const size = blob.size >= 1048576 ? `${(blob.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(blob.size / 1024))} KB`;
+                status.textContent = (splitExport ? `第 ${part} 段已生成（${done} / ${total} 条）。` : '')
+                    + `本文件有 ${count} 条消息、${stats.embedded} 项媒体（${size}）。`
+                    + (stats.missing ? ` ${stats.missing} 项媒体未能保存，已在档案中标记。` : '')
+                    + (stats.moved ? ` ${stats.moved} 项插图移至对应消息末尾。` : '')
+                    + (stats.limitReached ? (splitExport ? ' 本段有单条消息的图片超过容量上限。' : ' 已达单文件图片大小上限。可勾选「自动分段导出」重试。') : '')
+                    + (more ? ' 下载本段后，点「生成下一段」。' : splitExport ? ' 这是最后一段。' : '');
+                download.focus();
+                if (more) {
+                    await waitForNextPart(signal);
+                    clearResult(3000);
+                    status.textContent = '正在读取下一段消息和图片…';
+                }
+            }
         } catch (error) {
+            clearResult(3000);
             status.textContent = signal.aborted ? '已取消导出。' : '导出未完成。请刷新酒馆后重试。';
             if (!signal.aborted) console.warn('[ST HTML Export] Export failed:', error?.name || 'Error');
         } finally {
             if (subscribe) context.eventSource.removeListener(chatChanged, changed);
             controller = null;
-            start.disabled = includeUser.disabled = external.disabled = false;
+            start.disabled = includeUser.disabled = split.disabled = external.disabled = false;
             progress.hidden = cancel.hidden = true;
         }
     });

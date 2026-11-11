@@ -126,8 +126,54 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     assert.deepEqual(pageErrors, []);
     await page.screenshot({ path: path.join(results, 'mobile.png') });
+
+    // Lower the media budget in a separate page to exercise real downloads without large test files.
+    await session.setOffline(false);
+    const splitPage = await session.newPage();
+    const assetsSource = await readFile(path.join(root, 'assets.js'), 'utf8');
+    await splitPage.route(`**${prefix}assets.js`, route => route.fulfill({
+        contentType: 'text/javascript',
+        body: assetsSource.replace('MAX_EMBEDDED = 96 * MiB', 'MAX_EMBEDDED = 550'),
+    }));
+    await splitPage.goto(url);
+    await splitPage.waitForFunction(() => globalThis.fixtureReady === true, null, { timeout: 12000 });
+    await splitPage.locator('#sthe-export-menu').click();
+    await splitPage.getByRole('checkbox', { name: /自动分段导出/ }).check();
+    await splitPage.getByRole('button', { name: '生成 HTML' }).click();
+    const combinedMessages = [];
+    let savedMedia = 0;
+    let partCount = 0;
+    for (let part = 1; part <= 10; part++) {
+        const link = splitPage.getByRole('link', { name: `下载第 ${part} 段` });
+        await link.waitFor({ timeout: 12000 });
+        const archive = await link.evaluate(async anchor => {
+            const html = await (await fetch(anchor.href)).text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            return {
+                messages: [...doc.querySelectorAll('.message .body')].map(node => node.textContent),
+                media: doc.querySelectorAll('.message img, .message video').length,
+                hitLimit: html.includes('已达到单文件图片大小上限'),
+            };
+        });
+        assert.equal(archive.hitLimit, false);
+        combinedMessages.push(...archive.messages);
+        savedMedia += archive.media;
+        partCount = part;
+        const more = splitPage.getByRole('button', { name: '生成下一段' });
+        if (await more.isVisible()) assert.equal(await more.isEnabled(), false);
+        const pending = splitPage.waitForEvent('download');
+        await link.click();
+        assert.ok((await pending).suggestedFilename().endsWith(`-${String(part).padStart(3, '0')}.html`));
+        if (!await more.isVisible()) break;
+        await more.click();
+    }
+    assert.ok(partCount > 1);
+    assert.equal(combinedMessages.length, 32);
+    assert.match(combinedMessages[1], /前文.*后文/s);
+    assert.match(combinedMessages[31], /嵌入状态栏/);
+    assert.equal(savedMedia, 9);
     await writeFile(path.join(results, 'result.txt'), 'PASS: Full chat, server + IndexedDB + live iframe images, selection, ordering, sanitation, cancellation, offline decoding, mobile layout.\n');
-    console.log('PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering');
+    console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads`);
 } finally {
     await browser?.close();
     server.closeAllConnections();
