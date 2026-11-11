@@ -4,6 +4,7 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
+import JSZip from 'jszip';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const prefix = '/scripts/extensions/third-party/st-html-export/';
@@ -11,7 +12,8 @@ const staticFiles = new Map([
     ['/', ['tests/fixture.html', 'text/html; charset=utf-8']],
     ['/fixture.js', ['tests/fixture.js', 'text/javascript; charset=utf-8']],
     ['/dompurify.mjs', ['node_modules/dompurify/dist/purify.es.mjs', 'text/javascript']],
-    ...['index.js', 'document.js', 'render.js', 'model.js', 'chatu8.js', 'assets.js', 'regex-filter.js', 'regex-worker.js', 'organizer.js', 'tags.js', 'style.css']
+    ['/lib/jszip.min.js', ['node_modules/jszip/dist/jszip.min.js', 'text/javascript']],
+    ...['index.js', 'document.js', 'epub.js', 'render.js', 'model.js', 'chatu8.js', 'assets.js', 'regex-filter.js', 'regex-worker.js', 'organizer.js', 'tags.js', 'style.css']
         .map(file => [prefix + file, [file, file.endsWith('.css') ? 'text/css' : 'text/javascript; charset=utf-8']]),
 ]);
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ3sAAAAASUVORK5CYII=', 'base64');
@@ -145,6 +147,75 @@ try {
     assert.ok(cleaned.includes(expected[0]) && cleaned.includes(expected[1]));
     assert.match(await page.getByRole('status').textContent(), /32 条消息、9 项媒体/);
     assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
+    await page.getByRole('button', { name: '导出设置' }).click();
+
+    // Export the same cleaned selection as a reflowable, illustrated EPUB.
+    const output = page.getByRole('combobox', { name: '导出格式' });
+    await output.selectOption('epub');
+    await includeUser.uncheck();
+    await page.getByRole('spinbutton', { name: '每章消息数' }).fill('12');
+    await page.evaluate(() => {
+        testValues.context.chat[12].extra = { media: [{ type: 'video', url: `data:video/mp4;base64,${btoa('\x00\x00\x00\x18ftypisom')}` }] };
+    });
+    await page.getByRole('button', { name: '生成 EPUB' }).click();
+    const bookLink = page.getByRole('link', { name: '下载 EPUB' });
+    await bookLink.waitFor({ timeout: 12000 });
+    assert.match(await page.getByRole('status').textContent(), /31 条消息、8 项媒体/);
+    assert.match(await page.getByRole('status').textContent(), /视频可用 HTML 导出/);
+    const pendingBook = page.waitForEvent('download');
+    await bookLink.click();
+    const book = await pendingBook;
+    assert.match(book.suggestedFilename(), /\.epub$/);
+    const epubPath = path.join(results, 'archive.epub');
+    await book.saveAs(epubPath);
+    const bookBytes = await readFile(epubPath);
+    assert.equal(bookBytes.readUInt32LE(0), 0x04034b50);
+    assert.equal(bookBytes.readUInt16LE(8), 0); // ZIP STORE for the first entry
+    assert.equal(bookBytes.readUInt16LE(28), 0); // No extra field for mimetype
+    assert.equal(bookBytes.subarray(30, 38).toString(), 'mimetype');
+    assert.equal(bookBytes.subarray(38, 58).toString(), 'application/epub+zip');
+    const zip = await JSZip.loadAsync(bookBytes, { checkCRC32: true });
+    const manifest = await zip.file('EPUB/package.opf').async('string');
+    const toc = await zip.file('EPUB/nav.xhtml').async('string');
+    const container = await zip.file('META-INF/container.xml').async('string');
+    const chapterNames = Object.keys(zip.files).filter(name => /^EPUB\/chapters\/chapter-\d+\.xhtml$/.test(name));
+    assert.equal(chapterNames.length, 3);
+    const chapters = await Promise.all(chapterNames.map(name => zip.file(name).async('string')));
+    const bookStructure = await page.evaluate(({ manifest, toc, container, chapters }) => {
+        const parse = text => new DOMParser().parseFromString(text, 'application/xml');
+        const opf = parse(manifest);
+        const nav = parse(toc);
+        const packageXml = parse(container);
+        const pages = chapters.map(parse);
+        return {
+            invalid: [opf, nav, packageXml, ...pages].some(doc => doc.querySelector('parsererror')),
+            counts: pages.map(doc => doc.querySelectorAll('article.message').length),
+            references: pages.flatMap(doc => [...doc.querySelectorAll('img')].map(img => img.getAttribute('src'))),
+            spine: [...opf.getElementsByTagNameNS('http://www.idpf.org/2007/opf', 'itemref')].map(node => node.getAttribute('idref')),
+            links: [...nav.querySelectorAll('ol a')].map(node => node.getAttribute('href')),
+        };
+    }, { manifest, toc, container, chapters });
+    assert.equal(bookStructure.invalid, false);
+    assert.deepEqual(bookStructure.counts, [12, 12, 7]);
+    assert.deepEqual(bookStructure.spine, ['chapter-1', 'chapter-2', 'chapter-3']);
+    assert.deepEqual(bookStructure.links.map(href => `EPUB/${href}`), chapterNames);
+    assert.equal(bookStructure.references.length, 8);
+    assert.ok(new Set(bookStructure.references).size < bookStructure.references.length);
+    for (const href of bookStructure.references) {
+        assert.match(href, /^\.\.\/images\//);
+        const asset = zip.file(`EPUB/${href.slice(3)}`);
+        assert.ok(asset);
+        const image = await asset.async('nodebuffer');
+        assert.equal(image.subarray(1, 4).toString(), 'PNG');
+    }
+    const bookText = chapters.join('\n');
+    assert.ok(bookText.includes('雨夜开场') && bookText.includes('嵌入状态栏'));
+    assert.ok(!bookText.includes('原文思考') && !bookText.includes('普通图片附件'));
+    assert.ok(!bookText.includes('src="data:') && !bookText.includes('src="blob:'));
+    await page.evaluate(() => { delete testValues.context.chat[12].extra; });
+    await output.selectOption('html');
+    await includeUser.check();
+    await page.getByRole('button', { name: '内容整理' }).click();
     await regexToggle.uncheck();
     await page.getByRole('button', { name: '导出设置' }).click();
 
@@ -250,6 +321,28 @@ try {
     }, { modulePrefix: prefix });
     assert.deepEqual(wholeMessage, [[1, 3, 0], [1, 4, 0]]);
 
+    const volumes = await splitPage.evaluate(async ({ modulePrefix }) => {
+        const { buildArchiveParts } = await import(`${modulePrefix}document.js`);
+        const { snapshotChat } = await import(`${modulePrefix}model.js`);
+        const { DOMPurify } = await import('/lib.js');
+        const { urlA, urlB, urlC } = testValues;
+        const size = url => atob(url.split(',')[1]).length;
+        const chat = [[urlA, urlB], [urlB, urlC]].map((urls, index) => ({
+            name: '旅人', mes: `<p>第 ${index + 1} 条</p>` + urls.map(url => `<img src="${url}">`).join(''),
+        }));
+        const books = [];
+        for await (const part of buildArchiveParts(snapshotChat({ chat, chatId: '分卷测试' }), {
+            format: raw => raw, sanitize: (html, config) => DOMPurify.sanitize(html, config),
+            output: 'epub', split: true, maxEmbedded: size(urlB) + Math.max(size(urlA), size(urlC)),
+        })) {
+            const zip = await globalThis.JSZip.loadAsync(part.blob);
+            const files = Object.keys(zip.files).filter(name => name.startsWith('EPUB/images/'));
+            books.push([part.filename, part.count, part.stats.missing, files.length]);
+        }
+        return books;
+    }, { modulePrefix: prefix });
+    assert.deepEqual(volumes, [['酒馆聊天-分卷测试-001.epub', 1, 0, 2], ['酒馆聊天-分卷测试-002.epub', 1, 0, 2]]);
+
     await splitPage.evaluate(() => {
         testValues.context.chat.push(
             { name: '我', mes: '导出之后我继续聊天了。', is_user: true },
@@ -284,7 +377,7 @@ try {
     assert.match(await resumedLink.getAttribute('download'), /消息34-34\.html$/);
     assert.match(await splitPage.getByRole('status').textContent(), /本文件有 1 条消息/);
     await writeFile(path.join(results, 'result.txt'), 'PASS: Full chat, server + IndexedDB + live iframe images, selection, ordering, sanitation, cancellation, offline decoding, mobile layout.\n');
-    console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads, incremental export, regex filtering`);
+    console.log(`PASS: offline HTML, ${partCount} split downloads, incremental export, regex filtering, illustrated EPUB and volume splitting`);
 } finally {
     await browser?.close();
     server.closeAllConnections();

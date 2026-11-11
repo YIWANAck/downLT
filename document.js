@@ -1,7 +1,8 @@
 import { normalizeTag } from './model.js';
 import { openChatu8 } from './chatu8.js';
-import { createAssetLoader, describeMediaFailures, MAX_EMBEDDED } from './assets.js';
+import { createAssetLoader, describeMediaFailures, EPUB_IMAGE_EXTENSIONS, MAX_BOOK_MEDIA, MAX_EMBEDDED } from './assets.js';
 import { renderMessage } from './render.js';
+import { buildEpub } from './epub.js';
 
 export const archiveCss = `
 :root{color-scheme:light dark;--bg:#f5f2eb;--paper:#fffcf5;--ink:#26261f;--muted:#625d51;--line:#ded7c9;--accent:#32534a;--mine:#e7f0e9}
@@ -20,27 +21,39 @@ footer{border-top:1px solid var(--line);margin-top:20px;padding-top:12px}@media 
 
 const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
-export function fileName(title) {
+export function fileName(title, extension = 'html') {
     const clean = String(title).replace(/[<>:"/\\|?*\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '_').trim().replace(/[. ]+$/g, '');
-    return `酒馆聊天-${Array.from(clean || '记录').slice(0, 90).join('')}.html`;
+    return `酒馆聊天-${Array.from(clean || '记录').slice(0, 90).join('')}.${extension}`;
+}
+
+function archiveNotes(stats, book = false) {
+    return [
+        stats.missing ? `${stats.missing} 项图片或视频未能内嵌（${describeMediaFailures(stats.failures)}）。` : '',
+        stats.moved ? `${stats.moved} 项插图放在对应消息末尾。` : '',
+        stats.limitReached ? (book ? '已达到单卷图片大小上限。' : '已达到单文件图片大小上限。') : '',
+    ].filter(Boolean).join(' ');
 }
 
 export function wrapArchive(title, articles, stats, timestamp = new Date()) {
     const time = timestamp.toLocaleString('zh-CN', { hour12: false });
-    const notes = [
-        stats.missing ? `${stats.missing} 项图片或视频未能内嵌（${describeMediaFailures(stats.failures)}）。` : '',
-        stats.moved ? `${stats.moved} 项插图放在对应消息末尾。` : '',
-        stats.limitReached ? '已达到单文件图片大小上限。' : '',
-    ].filter(Boolean).join(' ');
+    const notes = archiveNotes(stats);
     const head = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; media-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title><style>${archiveCss}</style></head><body><main class="wrap"><header class="cover"><p class="eyebrow">SILLYTAVERN · 聊天归档</p><h1>${escapeHtml(title)}</h1><p class="meta">导出于 ${escapeHtml(time)}</p><p class="summary">${articles.length} 条消息 · ${stats.embedded} 项内嵌媒体</p>${notes ? `<p class="summary note">${escapeHtml(notes)}</p>` : ''}</header>`;
     return new Blob([head, ...articles, '<footer>离线聊天记录 · SillyTavern</footer></main></body></html>'], { type: 'text/html;charset=utf-8' });
 }
 
 const newStats = () => ({ embedded: 0, missing: 0, moved: 0, failures: {} });
 
-export async function* buildArchiveParts(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, base, maxEmbedded = MAX_EMBEDDED, split = false, regexFilter }) {
+function additionalBytes(resources, existing) {
+    let bytes = 0;
+    for (const [name, asset] of resources) if (!existing.has(name)) bytes += asset.blob.size;
+    return bytes;
+}
+
+export async function* buildArchiveParts(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, onPack, base, maxEmbedded, split = false, regexFilter, output = 'html', chapterSize = 20 }) {
+    const book = output === 'epub';
+    maxEmbedded ??= book ? MAX_BOOK_MEDIA : MAX_EMBEDDED;
     const gallery = await openChatu8(settings, signal);
-    const assets = createAssetLoader({ base, external, signal, maxEmbedded });
+    const assets = createAssetLoader({ base, external, signal, maxEmbedded, binary: book });
     const delimiters = { start: settings.startTag || 'image###', end: settings.endTag || '###' };
     const normalize = value => normalizeTag(value, substitute);
     const timestamp = new Date();
@@ -50,15 +63,22 @@ export async function* buildArchiveParts(snapshot, { rendered = new Map(), forma
     let partBytes = 0;
     let done = 0;
     let part = 1;
+    let images = new Map();
+    const imageNames = new WeakMap();
+    let nextImage = 1;
 
-    function finishPart(more) {
-        const title = split ? `${snapshot.title} · 第 ${part} 段` : snapshot.title;
-        const filename = fileName(snapshot.title);
+    async function finishPart(more) {
+        const unit = book ? '卷' : '段';
+        const title = split ? `${snapshot.title} · 第 ${part} ${unit}` : snapshot.title;
         const suffix = String(part).padStart(3, '0');
+        const filename = fileName(snapshot.title, output);
         const partStats = { ...stats, limitReached: Boolean(stats.failures.budget) };
+        const blob = book
+            ? await buildEpub({ title, articles, images, chapterSize, notes: archiveNotes(partStats, true), timestamp, signal, onPack })
+            : wrapArchive(title, articles, partStats, timestamp);
         return {
-            blob: wrapArchive(title, articles, partStats, timestamp),
-            filename: split ? `${filename.slice(0, -5)}-${suffix}.html` : filename,
+            blob,
+            filename: split ? `${filename.slice(0, filename.lastIndexOf('.'))}-${suffix}.${output}` : filename,
             part, more, done, total, count: articles.length, stats: partStats,
         };
     }
@@ -68,22 +88,32 @@ export async function* buildArchiveParts(snapshot, { rendered = new Map(), forma
             signal?.throwIfAborted();
             if (split) assets.resetBudget();
             const messageStats = newStats();
-            const body = await renderMessage(message, { rendered, format, sanitize, imageGroups: snapshot.imageGroups, delimiters, normalize, gallery, assets, stats: messageStats, signal, regexFilter });
+            const resources = new Map();
+            const bookAsset = book ? asset => {
+                if (!imageNames.has(asset)) imageNames.set(asset, `image-${nextImage++}.${EPUB_IMAGE_EXTENSIONS[asset.mime]}`);
+                const name = imageNames.get(asset);
+                resources.set(name, asset);
+                return `../images/${name}`;
+            } : undefined;
+            const body = await renderMessage(message, { rendered, format, sanitize, imageGroups: snapshot.imageGroups, delimiters, normalize, gallery, assets, stats: messageStats, signal, regexFilter, bookAsset });
             if (split) rendered.delete(message.index);
-            const article = `<article class="message${message.is_user ? ' mine' : ''}"><header><span class="speaker">${escapeHtml(message.name)}</span>${message.date ? `<span class="time">${escapeHtml(message.date)}</span>` : ''}</header><div class="body">${body}</div></article>`;
-            const bytes = assets.embeddedBytes;
+            const article = `<article class="message${message.is_user ? ' mine' : ''}"><header><span class="speaker">${escapeHtml(message.name)}</span>${message.date ? `<span class="time">${escapeHtml(message.date)}</span>` : ''}</header>${book ? body : `<div class="body">${body}</div>`}</article>`;
+            let bytes = book && split ? additionalBytes(resources, images) : assets.embeddedBytes;
             if (split && articles.length && partBytes + bytes > maxEmbedded) {
                 // Keep the boundary message intact in the next part, including any media already read.
-                const finished = finishPart(true);
+                const finished = await finishPart(true);
                 articles = [];
+                images = new Map();
                 stats = newStats();
                 partBytes = 0;
                 assets.clearCache();
+                if (book) bytes = additionalBytes(resources, images);
                 yield finished;
                 signal?.throwIfAborted();
                 part++;
             }
             articles.push(article);
+            for (const [name, asset] of resources) images.set(name, asset);
             stats.embedded += messageStats.embedded;
             stats.missing += messageStats.missing;
             stats.moved += messageStats.moved;
@@ -97,6 +127,6 @@ export async function* buildArchiveParts(snapshot, { rendered = new Map(), forma
             if (done % 8 === 0) await new Promise(resolve => setTimeout(resolve, 0));
         }
         signal?.throwIfAborted();
-        yield finishPart(false);
+        yield await finishPart(false);
     } finally { gallery.close(); }
 }

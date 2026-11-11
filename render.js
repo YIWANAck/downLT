@@ -182,7 +182,7 @@ export async function previewMessage(message, options) {
 }
 
 export async function renderMessage(message, options) {
-    const { sanitize, imageGroups, delimiters, normalize, gallery, assets, stats } = options;
+    const { sanitize, imageGroups, delimiters, normalize, gallery, assets, stats, bookAsset } = options;
     const { markup, plain, originalRaw, raw, originalLive, live, originalMarkup, filtered } = await prepareMarkup(message, options);
     const fragment = sanitize(markup ?? '', SANITIZE);
     const doc = fragment.ownerDocument;
@@ -212,15 +212,17 @@ export async function renderMessage(message, options) {
         }
         stats.embedded++;
         const media = doc.createElement(asset.mime.startsWith('video/') ? 'video' : 'img');
-        media.setAttribute('src', asset.data);
+        media.setAttribute('src', bookAsset ? bookAsset(asset) : asset.data);
         if (media.localName === 'video') {
             media.setAttribute('controls', '');
             media.setAttribute('playsinline', '');
             media.setAttribute('preload', 'none');
         } else {
             media.alt = alt || '聊天插图';
-            media.loading = 'lazy';
-            media.decoding = 'async';
+            if (!bookAsset) {
+                media.loading = 'lazy';
+                media.decoding = 'async';
+            }
         }
         wrapper.append(media);
         if (moved) {
@@ -315,6 +317,10 @@ export async function renderMessage(message, options) {
         if (shownUrls.has(attachment.url)) continue;
         shownUrls.add(attachment.url);
         root.append(mediaNode(await assets.embed(attachment.url)));
+    }
+    if (bookAsset) {
+        root.className = 'body';
+        return new XMLSerializer().serializeToString(root);
     }
     return root.innerHTML;
 }

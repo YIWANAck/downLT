@@ -1,6 +1,7 @@
 const MiB = 1024 * 1024;
 const MAX_ASSET = 24 * MiB;
 export const MAX_EMBEDDED = 96 * MiB;
+export const MAX_BOOK_MEDIA = 128 * MiB;
 
 export const MEDIA_FAILURES = {
     cache: '找不到生图缓存',
@@ -11,6 +12,12 @@ export const MEDIA_FAILURES = {
     format: '文件为空或格式不受支持',
     oversized: '单个文件超过 24 MiB',
     budget: '超出本文件的内嵌容量',
+    bookVideo: 'EPUB 版仅保存图片，视频可用 HTML 导出',
+    dimensions: '图片像素过大，无法转成 EPUB 插图',
+};
+
+export const EPUB_IMAGE_EXTENSIONS = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
 };
 
 export function describeMediaFailures(failures) {
@@ -78,9 +85,29 @@ function toDataUrl(blob) {
     });
 }
 
-export function createAssetLoader({ base = location.href, external = false, signal, maxEmbedded = MAX_EMBEDDED } = {}) {
+async function epubImage(blob, mime) {
+    if (mime.startsWith('video/')) return { reason: 'bookVideo' };
+    if (EPUB_IMAGE_EXTENSIONS[mime]) return { asset: { mime, blob } };
+    let bitmap;
+    try {
+        bitmap = await createImageBitmap(new Blob([blob], { type: mime }));
+        if (bitmap.width * bitmap.height > 16_777_216) return { reason: 'dimensions' };
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        const png = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        if (!png) return { reason: 'format' };
+        if (png.size > MAX_ASSET) return { reason: 'oversized' };
+        return { asset: { mime: 'image/png', blob: png } };
+    } catch { return { reason: 'format' }; }
+    finally { bitmap?.close(); }
+}
+
+export function createAssetLoader({ base = location.href, external = false, signal, maxEmbedded = MAX_EMBEDDED, binary = false } = {}) {
     const cache = new Map();
     let embeddedBytes = 0;
+    let counted = new WeakSet();
 
     async function load(source, url) {
         const deadline = AbortSignal.timeout(12000);
@@ -94,6 +121,7 @@ export function createAssetLoader({ base = location.href, external = false, sign
             if (blob.size > MAX_ASSET) return { reason: 'oversized' };
             const mime = sniffMedia(new Uint8Array(await blob.slice(0, 32).arrayBuffer()));
             if (!mime) return { reason: 'format' };
+            if (binary) return epubImage(blob, mime);
             const data = await toDataUrl(new Blob([blob], { type: mime }));
             return { asset: { mime, data } };
         } catch (error) {
@@ -104,7 +132,7 @@ export function createAssetLoader({ base = location.href, external = false, sign
 
     return {
         get embeddedBytes() { return embeddedBytes; },
-        resetBudget() { embeddedBytes = 0; },
+        resetBudget() { embeddedBytes = 0; counted = new WeakSet(); },
         clearCache() { cache.clear(); },
         async embed(source, key) {
             signal?.throwIfAborted();
@@ -116,9 +144,12 @@ export function createAssetLoader({ base = location.href, external = false, sign
             const cacheKey = url || key;
             const result = (cacheKey && cache.get(cacheKey)) || await load(source, url);
             signal?.throwIfAborted();
-            if (result.asset && result.asset.data.length + embeddedBytes > maxEmbedded) return { reason: 'budget' };
+            const { asset } = result;
+            const bytes = binary ? (asset && !counted.has(asset) ? asset.blob.size : 0) : (asset?.data.length ?? 0);
+            if (embeddedBytes + bytes > maxEmbedded) return { reason: 'budget' };
             if (cacheKey) cache.set(cacheKey, result);
-            embeddedBytes += result.asset?.data.length ?? 0;
+            if (binary && asset) counted.add(asset);
+            embeddedBytes += bytes;
             return result;
         },
     };

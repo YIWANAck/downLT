@@ -6,6 +6,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "Codex",
-  "version": "1.5.0",
-  "description": "把当前聊天和 st-chatu8 插图保存为离线 HTML。"
+  "version": "1.6.0",
+  "description": "把当前聊天和 st-chatu8 插图保存为离线 HTML 或 EPUB 电子书。"
 }

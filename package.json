@@ -1,15 +1,16 @@
 {
   "name": "st-html-export",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:browser": "node tests/browser.mjs",
-    "check": "node --check index.js && node --check model.js && node --check chatu8.js && node --check render.js && node --check assets.js && node --check document.js && node --check regex-filter.js && node --check regex-worker.js && node --check organizer.js && node --check tags.js"
+    "check": "node --check index.js && node --check model.js && node --check chatu8.js && node --check render.js && node --check assets.js && node --check document.js && node --check epub.js && node --check regex-filter.js && node --check regex-worker.js && node --check organizer.js && node --check tags.js"
   },
   "devDependencies": {
     "dompurify": "3.4.17",
+    "jszip": "3.10.1",
     "playwright": "1.65.0"
   }
 }

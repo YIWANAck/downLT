@@ -5,6 +5,7 @@ import { buildArchiveParts } from './document.js';
 import { describeMediaFailures } from './assets.js';
 import { createRegexFilter, RegexFilterError } from './regex-filter.js';
 import { createOrganizer, element } from './organizer.js';
+import { EpubExportError } from './epub.js';
 
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
@@ -42,13 +43,31 @@ function install() {
     dialog.id = 'sthe-dialog';
     dialog.setAttribute('aria-labelledby', 'sthe-title');
     const header = element('div', 'sthe-header');
-    const title = element('h2', null, '导出聊天为 HTML');
+    const title = element('h2', null, '导出聊天');
     title.id = 'sthe-title';
     const close = element('button', 'menu_button sthe-close', '关闭');
     close.type = 'button';
     header.append(title, close);
 
     const info = element('p', null, '保存当前聊天和可用插图。导出文件可离线打开。');
+    const formatLabel = element('label', 'sthe-option', '导出格式');
+    const output = element('select');
+    for (const [value, label] of [['html', 'HTML 网页'], ['epub', 'EPUB 电子书']]) {
+        const option = element('option', null, label);
+        option.value = value;
+        output.append(option);
+    }
+    formatLabel.append(output);
+    const bookFields = element('div', 'sthe-resume-fields');
+    bookFields.hidden = true;
+    const chaptersLabel = element('label', 'sthe-option', '每章消息数');
+    const chapterSize = element('input');
+    chapterSize.type = 'number';
+    chapterSize.min = '1';
+    chapterSize.step = '1';
+    chapterSize.value = '20';
+    chaptersLabel.append(chapterSize);
+    bookFields.append(chaptersLabel, element('small', null, '用 EPUB 阅读器打开，按目录跳转。插图随书保存。'));
     const userOption = element('label', 'sthe-option');
     const includeUser = element('input');
     includeUser.type = 'checkbox';
@@ -74,7 +93,8 @@ function install() {
     const splitOption = element('label', 'sthe-option');
     const split = element('input');
     split.type = 'checkbox';
-    splitOption.append(split, '自动分段导出（适合图片较多的聊天）');
+    const splitLabel = element('span', null, '自动分段导出（适合图片较多的聊天）');
+    splitOption.append(split, splitLabel);
     const option = element('label', 'sthe-option');
     const external = element('input');
     external.type = 'checkbox';
@@ -87,7 +107,7 @@ function install() {
     nav.append(exportTab, organizeTab);
     const exportPanel = element('section', 'sthe-panel sthe-export-panel');
     const cleanupStatus = element('p', 'sthe-cleanup-status');
-    exportPanel.append(info, userOption, resumeOption, resumeFields, splitOption, option, cleanupStatus);
+    exportPanel.append(info, formatLabel, bookFields, userOption, resumeOption, resumeFields, splitOption, option, cleanupStatus);
     const progress = element('progress', 'sthe-progress');
     progress.hidden = true;
     progress.setAttribute('aria-label', '导出进度');
@@ -215,6 +235,15 @@ function install() {
     });
     from.addEventListener('input', () => { clearResult(); status.textContent = ''; });
     split.addEventListener('change', () => { clearResult(); status.textContent = ''; });
+    output.addEventListener('change', () => {
+        const book = output.value === 'epub';
+        bookFields.hidden = !book;
+        start.textContent = book ? '生成 EPUB' : '生成 HTML';
+        splitLabel.textContent = book ? '自动分卷导出（适合图片较多的聊天）' : '自动分段导出（适合图片较多的聊天）';
+        clearResult();
+        status.textContent = '';
+    });
+    chapterSize.addEventListener('input', () => { clearResult(); status.textContent = ''; });
     close.addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => {
         controller?.abort();
@@ -230,6 +259,7 @@ function install() {
         controller = new AbortController();
         const { signal } = controller;
         start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = true;
+        output.disabled = chapterSize.disabled = true;
         exportTab.disabled = organizeTab.disabled = true;
         organizer.setBusy(true);
         progress.hidden = cancel.hidden = false;
@@ -242,6 +272,12 @@ function install() {
         if (subscribe) context.eventSource.on(chatChanged, changed);
         let regexFilter;
         try {
+            const book = output.value === 'epub';
+            if (book && (!Number.isSafeInteger(chapterSize.valueAsNumber) || chapterSize.valueAsNumber < 1)) {
+                throw new ExportSelectionError('每章消息数必须是正整数。');
+            }
+            const unit = book ? '卷' : '段';
+            next.textContent = `生成下一${unit}`;
             const { rules, tags } = organizer.filters();
             const key = progressKey(identity, includeUser.checked);
             const hashes = key ? messagePrefixHashes(context.chat) : [];
@@ -260,12 +296,18 @@ function install() {
                 substitute: value => value.includes('{{') ? (context.substituteParams?.(value) ?? value) : value,
                 external: external.checked,
                 split: splitExport,
+                output: output.value,
+                chapterSize: chapterSize.valueAsNumber,
                 regexFilter,
                 signal,
                 onProgress({ done, total }) {
                     changed();
                     progress.value = done;
                     status.textContent = `已处理 ${done} / ${total} 条消息…`;
+                },
+                onPack(percent) {
+                    changed();
+                    if (!signal.aborted) status.textContent = `正在打包 EPUB（${percent}%）…`;
                 },
             })) {
                 signal.throwIfAborted();
@@ -274,7 +316,8 @@ function install() {
                 download.href = resultUrl;
                 const first = snapshot.messages[done - count].index + 1;
                 const end = snapshot.messages[done - 1].index + 1;
-                download.download = resumeExport ? `${filename.slice(0, -5)}-消息${first}-${end}.html` : filename;
+                const extensionAt = filename.lastIndexOf('.');
+                download.download = resumeExport ? `${filename.slice(0, extensionAt)}-消息${first}-${end}${filename.slice(extensionAt)}` : filename;
                 recordDownload = key ? () => {
                     recordDownload = null;
                     try {
@@ -285,26 +328,26 @@ function install() {
                         if (resumeExport) { from.value = ''; updateResumeHint(); }
                     } catch { status.textContent += ' 浏览器无法记录本次下载进度。'; }
                 } : null;
-                download.textContent = splitExport ? `下载第 ${part} 段` : '下载 HTML';
+                download.textContent = splitExport ? `下载第 ${part} ${unit}` : book ? '下载 EPUB' : '下载 HTML';
                 download.hidden = false;
                 const size = blob.size >= 1048576 ? `${(blob.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(blob.size / 1024))} KB`;
-                status.textContent = (splitExport ? `第 ${part} 段已生成（${done} / ${total} 条）。` : '')
+                status.textContent = (splitExport ? `第 ${part} ${unit}已生成（${done} / ${total} 条）。` : '')
                     + `本文件有 ${count} 条消息、${stats.embedded} 项媒体（${size}）。`
                     + (stats.missing ? ` ${stats.missing} 项媒体未能保存（${describeMediaFailures(stats.failures)}），已在档案中标记。` : '')
                     + (stats.moved ? ` ${stats.moved} 项插图移至对应消息末尾。` : '')
-                    + (stats.limitReached ? (splitExport ? ' 本段有单条消息的图片超过容量上限。' : ' 已达单文件图片大小上限。可勾选「自动分段导出」重试。') : '')
-                    + (more ? ' 下载本段后，点「生成下一段」。' : splitExport ? ' 这是最后一段。' : '');
+                    + (stats.limitReached ? (splitExport ? ` 本${unit}有单条消息的图片超过容量上限。` : ` 已达单文件图片大小上限。可勾选「自动分${unit}导出」重试。`) : '')
+                    + (more ? ` 下载本${unit}后，点「生成下一${unit}」。` : splitExport ? ` 这是最后一${unit}。` : '');
                 download.focus();
                 if (more) {
                     await waitForNextPart(signal);
                     clearResult(3000);
-                    status.textContent = '正在读取下一段消息和图片…';
+                    status.textContent = `正在读取下一${unit}的消息和图片…`;
                 }
             }
         } catch (error) {
             clearResult(3000);
             if (signal.aborted) status.textContent = '已取消导出。';
-            else if (error instanceof RegexFilterError || error instanceof ExportSelectionError) status.textContent = error.message;
+            else if (error instanceof RegexFilterError || error instanceof ExportSelectionError || error instanceof EpubExportError) status.textContent = error.message;
             else status.textContent = '导出未完成。请刷新酒馆后重试。';
             if (!signal.aborted) console.warn('[ST HTML Export] Export failed:', error?.name || 'Error');
         } finally {
@@ -312,6 +355,7 @@ function install() {
             if (subscribe) context.eventSource.removeListener(chatChanged, changed);
             controller = null;
             start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = false;
+            output.disabled = chapterSize.disabled = false;
             exportTab.disabled = organizeTab.disabled = false;
             organizer.setBusy(false);
             progress.hidden = cancel.hidden = true;
@@ -329,14 +373,14 @@ function install() {
         if (!dialog.open) dialog.showModal();
     }
     if (menu) {
-        const trigger = element('button', 'list-group-item sthe-menu', '导出聊天为 HTML');
+        const trigger = element('button', 'list-group-item sthe-menu', '导出聊天（HTML / EPUB）');
         trigger.id = 'sthe-export-menu';
         trigger.type = 'button';
         trigger.addEventListener('click', show);
         menu.append(trigger);
     }
     if (settingsPanel) {
-        const trigger = element('button', 'menu_button sthe-settings', '导出聊天为 HTML');
+        const trigger = element('button', 'menu_button sthe-settings', '导出聊天（HTML / EPUB）');
         trigger.type = 'button';
         trigger.addEventListener('click', show);
         settingsPanel.append(trigger);
