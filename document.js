@@ -1,6 +1,6 @@
 import { normalizeTag } from './model.js';
 import { openChatu8 } from './chatu8.js';
-import { createAssetLoader, MAX_EMBEDDED } from './assets.js';
+import { createAssetLoader, describeMediaFailures, MAX_EMBEDDED } from './assets.js';
 import { renderMessage } from './render.js';
 
 export const archiveCss = `
@@ -28,7 +28,7 @@ export function fileName(title) {
 export function wrapArchive(title, articles, stats, timestamp = new Date()) {
     const time = timestamp.toLocaleString('zh-CN', { hour12: false });
     const notes = [
-        stats.missing ? `${stats.missing} 项图片或视频未能内嵌。` : '',
+        stats.missing ? `${stats.missing} 项图片或视频未能内嵌（${describeMediaFailures(stats.failures)}）。` : '',
         stats.moved ? `${stats.moved} 项插图放在对应消息末尾。` : '',
         stats.limitReached ? '已达到单文件图片大小上限。' : '',
     ].filter(Boolean).join(' ');
@@ -36,7 +36,7 @@ export function wrapArchive(title, articles, stats, timestamp = new Date()) {
     return new Blob([head, ...articles, '<footer>离线聊天记录 · SillyTavern</footer></main></body></html>'], { type: 'text/html;charset=utf-8' });
 }
 
-const newStats = () => ({ embedded: 0, missing: 0, moved: 0, limitReached: false });
+const newStats = () => ({ embedded: 0, missing: 0, moved: 0, failures: {} });
 
 export async function* buildArchiveParts(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, base, maxEmbedded = MAX_EMBEDDED, split = false }) {
     const gallery = await openChatu8(settings, signal);
@@ -55,10 +55,11 @@ export async function* buildArchiveParts(snapshot, { rendered = new Map(), forma
         const title = split ? `${snapshot.title} · 第 ${part} 段` : snapshot.title;
         const filename = fileName(snapshot.title);
         const suffix = String(part).padStart(3, '0');
+        const partStats = { ...stats, limitReached: Boolean(stats.failures.budget) };
         return {
-            blob: wrapArchive(title, articles, stats, timestamp),
+            blob: wrapArchive(title, articles, partStats, timestamp),
             filename: split ? `${filename.slice(0, -5)}-${suffix}.html` : filename,
-            part, more, done, total, count: articles.length, stats,
+            part, more, done, total, count: articles.length, stats: partStats,
         };
     }
 
@@ -86,7 +87,9 @@ export async function* buildArchiveParts(snapshot, { rendered = new Map(), forma
             stats.embedded += messageStats.embedded;
             stats.missing += messageStats.missing;
             stats.moved += messageStats.moved;
-            stats.limitReached ||= assets.limitReached;
+            for (const [reason, count] of Object.entries(messageStats.failures)) {
+                stats.failures[reason] = (stats.failures[reason] || 0) + count;
+            }
             partBytes = split ? partBytes + bytes : bytes;
             done++;
             onProgress({ done, total });

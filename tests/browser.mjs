@@ -63,6 +63,9 @@ try {
     const status = await page.getByRole('status').textContent();
     assert.match(status, /32 条消息、9 项媒体/);
     assert.match(status, /3 项媒体未能保存/);
+    assert.match(status, /找不到生图缓存/);
+    assert.match(status, /未开启外链图片导出/);
+    assert.doesNotMatch(status, /已达单文件图片大小上限/);
     assert.match(status, /1 项插图移至/);
     assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
     assert.equal(requests.filter(request => request === '/user/images/test.png').length, 1);
@@ -119,6 +122,7 @@ try {
     assert.equal(await page.getByText('危险链接').getAttribute('href'), null);
     assert.equal(await page.locator('pre code').textContent(), 'image###code###');
     assert.equal(await page.locator('.media-missing').count(), 3);
+    assert.equal(await page.locator('.media-missing').filter({ hasText: '找不到生图缓存' }).count(), 1);
     assert.ok(await page.locator('img').evaluateAll(async images => {
         await Promise.all(images.map(img => { img.loading = 'eager'; return img.decode(); }));
         return images.every(img => img.naturalWidth > 0);
@@ -172,6 +176,23 @@ try {
     assert.match(combinedMessages[1], /前文.*后文/s);
     assert.match(combinedMessages[31], /嵌入状态栏/);
     assert.equal(savedMedia, 9);
+
+    const wholeMessage = await splitPage.evaluate(async ({ modulePrefix }) => {
+        const { buildArchiveParts } = await import(`${modulePrefix}document.js`);
+        const { snapshotChat } = await import(`${modulePrefix}model.js`);
+        const { DOMPurify } = await import('/lib.js');
+        const source = testValues.urlA;
+        const chat = [3, 4].map(count => ({ name: '旅人', mes: `<p>${count} 张图</p>` + `<img src="${source}">`.repeat(count) }));
+        const results = [];
+        for await (const part of buildArchiveParts(snapshotChat({ chat }), {
+            format: raw => raw, sanitize: (html, config) => DOMPurify.sanitize(html, config),
+            split: true, maxEmbedded: source.length * 4,
+        })) {
+            results.push([part.count, part.stats.embedded, part.stats.missing]);
+        }
+        return results;
+    }, { modulePrefix: prefix });
+    assert.deepEqual(wholeMessage, [[1, 3, 0], [1, 4, 0]]);
     await writeFile(path.join(results, 'result.txt'), 'PASS: Full chat, server + IndexedDB + live iframe images, selection, ordering, sanitation, cancellation, offline decoding, mobile layout.\n');
     console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads`);
 } finally {

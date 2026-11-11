@@ -1,4 +1,5 @@
 import { getPlacements, splitTags } from './model.js';
+import { MEDIA_FAILURES } from './assets.js';
 
 const TAG = 'data-sthe-tag';
 const BUTTONS = 'button.image-tag-button,button.st-chatu8-image-button';
@@ -156,13 +157,14 @@ export async function renderMessage(message, { rendered, format, sanitize, image
     const shownTags = new Set();
     const shownUrls = new Set();
 
-    function mediaNode(asset, alt = '聊天插图', moved = false) {
+    function mediaNode({ asset, reason }, alt = '聊天插图', moved = false) {
         const wrapper = doc.createElement('span');
         wrapper.className = 'media';
         if (!asset) {
             stats.missing++;
+            stats.failures[reason] = (stats.failures[reason] || 0) + 1;
             wrapper.classList.add('media-missing');
-            wrapper.textContent = '图片未能保存到此档案';
+            wrapper.textContent = `媒体未能保存（${MEDIA_FAILURES[reason]}）`;
             return wrapper;
         }
         stats.embedded++;
@@ -193,14 +195,16 @@ export async function renderMessage(message, { rendered, format, sanitize, image
     const placements = getPlacements(message, imageGroups, textPositions(root).text);
     const expected = new Set(placements.map(item => keyFor(item?.tag)).filter(Boolean));
     async function embedTag(tag, currentSource) {
+        let displayed;
         if (currentSource) {
             shownUrls.add(currentSource);
-            const asset = await assets.embed(currentSource);
-            if (asset) return asset;
+            displayed = await assets.embed(currentSource);
+            if (displayed.asset) return displayed;
         }
         const entry = gallery.lookup(tag);
         const stored = await gallery.read(entry);
-        return stored ? assets.embed(stored, `chatu8:${entry.uuid}`) : null;
+        if (stored) return assets.embed(stored, `chatu8:${entry.uuid}`);
+        return displayed ?? { reason: entry ? 'unavailable' : 'cache' };
     }
 
     // Loaded messages supply the displayed variant and exact placement, even in same-origin frames.

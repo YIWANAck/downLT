@@ -2,6 +2,7 @@ import { DOMPurify } from '../../../../lib.js';
 import { snapshotChat } from './model.js';
 import { captureRenderedMessages } from './render.js';
 import { buildArchiveParts } from './document.js';
+import { describeMediaFailures } from './assets.js';
 
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
@@ -164,7 +165,7 @@ function install() {
                 const size = blob.size >= 1048576 ? `${(blob.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(blob.size / 1024))} KB`;
                 status.textContent = (splitExport ? `第 ${part} 段已生成（${done} / ${total} 条）。` : '')
                     + `本文件有 ${count} 条消息、${stats.embedded} 项媒体（${size}）。`
-                    + (stats.missing ? ` ${stats.missing} 项媒体未能保存，已在档案中标记。` : '')
+                    + (stats.missing ? ` ${stats.missing} 项媒体未能保存（${describeMediaFailures(stats.failures)}），已在档案中标记。` : '')
                     + (stats.moved ? ` ${stats.moved} 项插图移至对应消息末尾。` : '')
                     + (stats.limitReached ? (splitExport ? ' 本段有单条消息的图片超过容量上限。' : ' 已达单文件图片大小上限。可勾选「自动分段导出」重试。') : '')
                     + (more ? ' 下载本段后，点「生成下一段」。' : splitExport ? ' 这是最后一段。' : '');

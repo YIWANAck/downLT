@@ -2,6 +2,21 @@ const MiB = 1024 * 1024;
 const MAX_ASSET = 24 * MiB;
 export const MAX_EMBEDDED = 96 * MiB;
 
+export const MEDIA_FAILURES = {
+    cache: '找不到生图缓存',
+    external: '未开启外链图片导出',
+    source: '媒体地址不受支持',
+    unavailable: '源文件已不存在或无法读取',
+    timeout: '读取媒体超时',
+    format: '文件为空或格式不受支持',
+    oversized: '单个文件超过 24 MiB',
+    budget: '超出本文件的内嵌容量',
+};
+
+export function describeMediaFailures(failures) {
+    return Object.entries(failures).map(([reason, count]) => `${MEDIA_FAILURES[reason]}（${count} 项）`).join('、');
+}
+
 export function mediaUrl(source, base, external = false) {
     if (typeof source !== 'string' || !source.trim()) return null;
     if (/^data:(?:image\/(?:png|jpe?g|webp|gif|bmp|avif)|video\/(?:mp4|webm));base64,[a-z0-9+/=\s]+$/i.test(source)) return source;
@@ -35,16 +50,20 @@ export function sniffMedia(bytes) {
 }
 
 async function boundedBlob(response) {
-    if (!response.ok || Number(response.headers.get('content-length')) > MAX_ASSET || !response.body) return null;
+    if (!response.ok || !response.body) return { reason: 'unavailable' };
+    if (Number(response.headers.get('content-length')) > MAX_ASSET) {
+        await response.body.cancel();
+        return { reason: 'oversized' };
+    }
     const reader = response.body.getReader();
     const chunks = [];
     let length = 0;
     try {
         while (true) {
             const { value, done } = await reader.read();
-            if (done) return new Blob(chunks);
+            if (done) return { blob: new Blob(chunks) };
             length += value.length;
-            if (length > MAX_ASSET) { await reader.cancel(); return null; }
+            if (length > MAX_ASSET) { await reader.cancel(); return { reason: 'oversized' }; }
             chunks.push(value);
         }
     } finally { reader.releaseLock(); }
@@ -62,44 +81,45 @@ function toDataUrl(blob) {
 export function createAssetLoader({ base = location.href, external = false, signal, maxEmbedded = MAX_EMBEDDED } = {}) {
     const cache = new Map();
     let embeddedBytes = 0;
-    let limitReached = false;
+
+    async function load(source, url) {
+        const deadline = AbortSignal.timeout(12000);
+        try {
+            const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+            const result = url ? await boundedBlob(await fetch(url, {
+                credentials: 'same-origin', redirect: 'error', referrerPolicy: 'no-referrer', signal: requestSignal,
+            })) : { blob: source };
+            if (result.reason) return result;
+            const { blob } = result;
+            if (blob.size > MAX_ASSET) return { reason: 'oversized' };
+            const mime = sniffMedia(new Uint8Array(await blob.slice(0, 32).arrayBuffer()));
+            if (!mime) return { reason: 'format' };
+            const data = await toDataUrl(new Blob([blob], { type: mime }));
+            return { asset: { mime, data } };
+        } catch (error) {
+            if (signal?.aborted) throw error;
+            return { reason: deadline.aborted ? 'timeout' : 'unavailable' };
+        }
+    }
+
     return {
         get embeddedBytes() { return embeddedBytes; },
-        get limitReached() { return limitReached; },
-        resetBudget() { embeddedBytes = 0; limitReached = false; },
+        resetBudget() { embeddedBytes = 0; },
         clearCache() { cache.clear(); },
         async embed(source, key) {
             signal?.throwIfAborted();
             const url = source instanceof Blob ? null : mediaUrl(source, base, external);
-            if (!(source instanceof Blob) && !url) return null;
-            if (url?.startsWith('data:') && url.length > MAX_ASSET * 1.4) return null;
-            const cacheKey = url || key;
-            let asset = cacheKey ? cache.get(cacheKey) : undefined;
-            if (asset === undefined) {
-                try {
-                    const deadline = AbortSignal.timeout(12000);
-                    const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
-                    const blob = url ? await boundedBlob(await fetch(url, {
-                        credentials: 'same-origin', redirect: 'error', referrerPolicy: 'no-referrer', signal: requestSignal,
-                    })) : source;
-                    const mime = blob?.size && blob.size <= MAX_ASSET
-                        ? sniffMedia(new Uint8Array(await blob.slice(0, 32).arrayBuffer())) : null;
-                    asset = mime ? { mime, data: await toDataUrl(new Blob([blob], { type: mime })) } : null;
-                } catch (error) {
-                    if (signal?.aborted) throw error;
-                    asset = null;
-                }
-                if (asset && asset.data.length + embeddedBytes > maxEmbedded) {
-                    limitReached = true;
-                    return null;
-                }
-                if (cacheKey) cache.set(cacheKey, asset);
+            if (!(source instanceof Blob) && !url) {
+                return { reason: !external && mediaUrl(source, base, true) ? 'external' : 'source' };
             }
+            if (url?.startsWith('data:') && url.length > MAX_ASSET * 1.4) return { reason: 'oversized' };
+            const cacheKey = url || key;
+            const result = (cacheKey && cache.get(cacheKey)) || await load(source, url);
             signal?.throwIfAborted();
-            if (!asset) return null;
-            if (asset.data.length + embeddedBytes > maxEmbedded) { limitReached = true; return null; }
-            embeddedBytes += asset.data.length;
-            return asset;
+            if (result.asset && result.asset.data.length + embeddedBytes > maxEmbedded) return { reason: 'budget' };
+            if (cacheKey) cache.set(cacheKey, result);
+            embeddedBytes += result.asset?.data.length ?? 0;
+            return result;
         },
     };
 }
