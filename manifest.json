@@ -1,0 +1,11 @@
+{
+  "display_name": "离线聊天 HTML 导出",
+  "loading_order": 60,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Codex",
+  "version": "1.0.0",
+  "description": "把当前聊天和 st-chatu8 插图保存为离线 HTML。"
+}

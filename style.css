@@ -1,0 +1,27 @@
+.sthe-dialog {
+    width: min(92vw, 440px);
+    max-height: 85dvh;
+    padding: 18px;
+    overflow: auto;
+    border: 1px solid var(--SmartThemeBorderColor, #5d6561);
+    border-radius: 14px;
+    background: var(--SmartThemeBlurTintColor, #202622);
+    backdrop-filter: blur(20px);
+    color: var(--SmartThemeBodyColor, #f1f3ee);
+    box-shadow: 0 12px 50px #0006;
+    text-align: left;
+}
+.sthe-dialog::backdrop { background: #0008; }
+.sthe-dialog [hidden] { display: none !important; }
+.sthe-header, .sthe-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.sthe-header { justify-content: space-between; }
+.sthe-header h2 { font-size: 1.18em; margin: 0; }
+.sthe-dialog p { margin: 12px 0; line-height: 1.5; }
+.sthe-dialog .menu_button { min-height: 38px; width: auto; margin: 0; padding: 6px 11px; }
+.sthe-option { display: flex; align-items: center; gap: 7px; font-size: .9em; }
+.sthe-progress { width: 100%; margin-top: 14px; }
+.sthe-status:empty { display: none; }
+.sthe-actions { justify-content: flex-end; margin-top: 16px; }
+.sthe-download { text-decoration: none; }
+.sthe-menu { width: 100%; text-align: left; font: inherit; color: inherit; }
+.sthe-settings { margin: 6px; }

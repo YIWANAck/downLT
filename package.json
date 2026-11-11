@@ -7,5 +7,9 @@
     "test": "node --test tests/*.test.js",
     "test:browser": "node tests/browser.mjs",
     "check": "node --check index.js && node --check model.js && node --check chatu8.js && node --check render.js && node --check assets.js && node --check document.js"
+  },
+  "devDependencies": {
+    "dompurify": "3.4.17",
+    "playwright": "1.65.0"
   }
 }
