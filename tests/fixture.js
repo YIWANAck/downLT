@@ -38,7 +38,7 @@ await new Promise((resolve, reject) => {
 
 const chat = Array.from({ length: 32 }, (_, i) => ({ name: '旅人', mes: `第 ${i + 1} 条消息` }));
 chat[0].mes = '第一条，没出现在酒馆页面。';
-chat[1].mes = '**前文** image###雨夜，站台### 后文';
+chat[1].mes = '**前文** <think>原文思考\n第二行思考</think> image###雨夜，站台### 后文 <options>原文选项</options>';
 chat[2].mes = '<p>她来到旧站台。</p><p>第二段。<em>回声</em></p>';
 chat[2].swipe_id = 1;
 chat[2].extra = { images: { 0: [{ tag: 'wrong' }], 1: [{ tag: 'server', regex: '旧站台。', endIndex: 1000 }] } };
@@ -63,7 +63,7 @@ const body = document.createElement('div');
 body.className = 'mes_text';
 const frame = document.createElement('iframe');
 const frameLoaded = new Promise(resolve => frame.addEventListener('load', resolve, { once: true }));
-frame.srcdoc = '<p>嵌入状态栏</p><button class="image-tag-button" data-request-id="live" data-link="live">生图按钮</button><span class="st-chatu8-image-span" data-request-id="live"></span>';
+frame.srcdoc = '<p>嵌入状态栏</p><choices>页面选项</choices><button class="image-tag-button" data-request-id="live" data-link="live">生图按钮</button><span class="st-chatu8-image-span" data-request-id="live"></span>';
 body.append(frame);
 live.append(body);
 document.getElementById('chat').append(live);

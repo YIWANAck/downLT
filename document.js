@@ -38,7 +38,7 @@ export function wrapArchive(title, articles, stats, timestamp = new Date()) {
 
 const newStats = () => ({ embedded: 0, missing: 0, moved: 0, failures: {} });
 
-export async function* buildArchiveParts(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, base, maxEmbedded = MAX_EMBEDDED, split = false }) {
+export async function* buildArchiveParts(snapshot, { rendered = new Map(), format, sanitize, settings = {}, substitute, external = false, signal, onProgress = () => {}, base, maxEmbedded = MAX_EMBEDDED, split = false, regexFilter }) {
     const gallery = await openChatu8(settings, signal);
     const assets = createAssetLoader({ base, external, signal, maxEmbedded });
     const delimiters = { start: settings.startTag || 'image###', end: settings.endTag || '###' };
@@ -68,7 +68,7 @@ export async function* buildArchiveParts(snapshot, { rendered = new Map(), forma
             signal?.throwIfAborted();
             if (split) assets.resetBudget();
             const messageStats = newStats();
-            const body = await renderMessage(message, { rendered, format, sanitize, imageGroups: snapshot.imageGroups, delimiters, normalize, gallery, assets, stats: messageStats, signal });
+            const body = await renderMessage(message, { rendered, format, sanitize, imageGroups: snapshot.imageGroups, delimiters, normalize, gallery, assets, stats: messageStats, signal, regexFilter });
             if (split) rendered.delete(message.index);
             const article = `<article class="message${message.is_user ? ' mine' : ''}"><header><span class="speaker">${escapeHtml(message.name)}</span>${message.date ? `<span class="time">${escapeHtml(message.date)}</span>` : ''}</header><div class="body">${body}</div></article>`;
             const bytes = assets.embeddedBytes;

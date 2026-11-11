@@ -135,20 +135,37 @@ function preserveAngleTags(raw, delimiters) {
     return raw;
 }
 
-export async function renderMessage(message, { rendered, format, sanitize, imageGroups, delimiters, normalize, gallery, assets, stats, signal }) {
+export async function renderMessage(message, { rendered, format, sanitize, imageGroups, delimiters, normalize, gallery, assets, stats, signal, regexFilter }) {
     signal?.throwIfAborted();
-    const live = rendered.get(message.index);
-    const raw = delimiters.start === '<image>' || delimiters.end === '</image>'
-        ? message.mes : message.mes.replace(/<\/?image\s*>/gi, '');
+    const originalLive = rendered.get(message.index);
+    const originalRaw = message.mes;
+    const { raw, live, preferRaw } = regexFilter
+        ? await regexFilter.apply(originalRaw, originalLive)
+        : { raw: originalRaw, live: originalLive, preferRaw: false };
+    const filtered = raw !== originalRaw || live !== originalLive;
+    const stripImageWrapper = text => delimiters.start === '<image>' || delimiters.end === '</image>'
+        ? text : text.replace(/<\/?image\s*>/gi, '');
+    const formatSource = text => format(preserveAngleTags(stripImageWrapper(text), delimiters), message);
     let markup;
-    try { markup = live ?? format(preserveAngleTags(raw, delimiters), message); } catch { markup = null; }
+    let originalMarkup = originalLive;
+    try {
+        markup = live;
+        if (live === undefined || preferRaw) {
+            markup = formatSource(raw);
+            if (filtered) {
+                const formattedOriginal = formatSource(originalRaw);
+                originalMarkup ??= formattedOriginal;
+                if (live !== undefined && markup === formattedOriginal) markup = live;
+            }
+        }
+    } catch { markup ??= null; }
     const fragment = sanitize(markup ?? '', SANITIZE);
     const doc = fragment.ownerDocument;
     const root = doc.createElement('div');
     root.append(fragment);
     if (markup === null) {
         const plain = doc.createElement('pre');
-        plain.textContent = raw;
+        plain.textContent = stripImageWrapper(raw);
         root.append(plain);
     }
     safeLinks(root);
@@ -193,9 +210,30 @@ export async function renderMessage(message, { rendered, format, sanitize, image
         const wrapped = splitTags(value || '', delimiters.start, delimiters.end)[0];
         return normalize(wrapped?.tag ?? value);
     };
-    const placements = getPlacements(message, imageGroups, textPositions(root).text);
+    const reference = filtered && originalMarkup !== undefined
+        ? sanitize(originalMarkup, SANITIZE) : root;
+    const originalText = textPositions(reference).text;
+    const removedTags = new Set();
+    const liveSources = new Map();
+    if (filtered) {
+        const rawTags = value => splitTags(value, delimiters.start, delimiters.end).map(match => normalize(match.tag));
+        const retained = new Set(rawTags(raw));
+        for (const tag of rawTags(originalRaw)) if (!retained.has(tag)) removedTags.add(tag);
+        if (live !== originalLive) {
+            const retainedSlots = new Set([...sanitize(live, SANITIZE).querySelectorAll(`[${TAG}]`)].map(slot => normalize(slot.getAttribute(TAG))));
+            for (const slot of reference.querySelectorAll(`[${TAG}]`)) {
+                const tag = normalize(slot.getAttribute(TAG));
+                if (!retainedSlots.has(tag)) removedTags.add(tag);
+            }
+        }
+        for (const slot of reference.querySelectorAll(`[${TAG}]`)) {
+            const media = slot.querySelector('img[src],video');
+            if (media) liveSources.set(normalize(slot.getAttribute(TAG)), mediaSource(media));
+        }
+    }
+    const placements = getPlacements(message, imageGroups, originalText).filter(item => !removedTags.has(keyFor(item?.tag)));
     const expected = new Set(placements.map(item => keyFor(item?.tag)).filter(Boolean));
-    async function embedTag(tag, currentSource) {
+    async function embedTag(tag, currentSource = liveSources.get(tag)) {
         let displayed;
         if (currentSource) {
             shownUrls.add(currentSource);
@@ -213,7 +251,7 @@ export async function renderMessage(message, { rendered, format, sanitize, image
         const key = normalize(slot.getAttribute(TAG));
         const media = slot.querySelector('img[src],video');
         if (key) shownTags.add(key);
-        slot.replaceWith(mediaNode(await embedTag(key, media && mediaSource(media))));
+        slot.replaceWith(mediaNode(await embedTag(key, media ? mediaSource(media) : undefined)));
     }
     for (const media of root.querySelectorAll('img,video')) {
         if (media.closest('.media')) continue;
@@ -239,7 +277,7 @@ export async function renderMessage(message, { rendered, format, sanitize, image
         const key = keyFor(placement?.tag);
         if (!key || shownTags.has(key)) continue;
         shownTags.add(key);
-        const end = positionFor(text, placement);
+        const end = positionFor(text, text !== originalText && filtered ? { ...placement, endIndex: undefined } : placement);
         if (end === null || edits.some(edit => edit.start < end && end < edit.end)) {
             stats.moved++;
             root.append(mediaNode(await embedTag(key), undefined, true));

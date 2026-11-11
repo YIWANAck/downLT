@@ -3,10 +3,14 @@ import { chatIdentity, md5, messagePrefixHashes, snapshotChat } from './model.js
 import { captureRenderedMessages } from './render.js';
 import { buildArchiveParts } from './document.js';
 import { describeMediaFailures } from './assets.js';
+import { createRegexFilter, parseRemovalRules, RegexFilterError } from './regex-filter.js';
 
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
 const INCLUDE_USER_SETTING = 'st-html-export.include-user';
+const REGEX_RULES_SETTING = 'st-html-export.regex-rules';
+const EXAMPLE_RULES = String.raw`/<(think|thinking)\b[^>]*>[\s\S]*?<\/\1\s*>/gi
+/<(options|choices)\b[^>]*>[\s\S]*?<\/\1\s*>/gi`;
 
 function progressKey(identity, includeUser) {
     return identity && `st-html-export.progress.v1:${md5(JSON.stringify([identity, includeUser]))}`;
@@ -75,6 +79,21 @@ function install() {
     const external = element('input');
     external.type = 'checkbox';
     option.append(external, '尝试保存聊天中的外链图片（会访问图片网站）');
+    const regexOption = element('label', 'sthe-option');
+    const regexEnabled = element('input');
+    regexEnabled.type = 'checkbox';
+    regexOption.append(regexEnabled, '用正则移除导出内容');
+    const regexFields = element('div', 'sthe-regex-fields');
+    regexFields.hidden = true;
+    const ruleLabel = element('label', null, '要移除的内容');
+    const ruleEditor = element('textarea');
+    ruleEditor.rows = 4;
+    ruleEditor.spellcheck = false;
+    ruleEditor.value = EXAMPLE_RULES;
+    try { ruleEditor.value = localStorage.getItem(REGEX_RULES_SETTING) ?? EXAMPLE_RULES; }
+    catch { /* Use the examples when storage is disabled. */ }
+    ruleLabel.append(ruleEditor);
+    regexFields.append(ruleLabel, element('small', null, '每行一条 /表达式/标志。初始规则匹配 <think>、<thinking>、<options> 和 <choices> 块。'));
     const progress = element('progress', 'sthe-progress');
     progress.hidden = true;
     progress.setAttribute('aria-label', '导出进度');
@@ -91,7 +110,7 @@ function install() {
     next.type = 'button';
     next.hidden = true;
     actions.append(start, cancel, download, next);
-    dialog.append(header, info, userOption, resumeOption, resumeFields, splitOption, option, progress, status, actions);
+    dialog.append(header, info, userOption, resumeOption, resumeFields, splitOption, option, regexOption, regexFields, progress, status, actions);
     document.body.append(dialog);
 
     let controller = null;
@@ -149,6 +168,17 @@ function install() {
     });
     from.addEventListener('input', () => { clearResult(); status.textContent = ''; });
     split.addEventListener('change', () => { clearResult(); status.textContent = ''; });
+    regexEnabled.addEventListener('change', () => {
+        regexFields.hidden = !regexEnabled.checked;
+        clearResult();
+        status.textContent = '';
+    });
+    ruleEditor.addEventListener('input', () => {
+        clearResult();
+        status.textContent = '';
+        try { localStorage.setItem(REGEX_RULES_SETTING, ruleEditor.value); }
+        catch { /* The current rules remain available in the editor. */ }
+    });
     close.addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => {
         controller?.abort();
@@ -163,6 +193,7 @@ function install() {
         controller = new AbortController();
         const { signal } = controller;
         start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = true;
+        regexEnabled.disabled = ruleEditor.disabled = true;
         progress.hidden = cancel.hidden = false;
         progress.value = 0;
         status.textContent = '正在读取消息和图片…';
@@ -171,7 +202,9 @@ function install() {
         const chatChanged = context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED;
         const subscribe = chatChanged && typeof context.eventSource?.removeListener === 'function';
         if (subscribe) context.eventSource.on(chatChanged, changed);
+        let regexFilter;
         try {
+            const rules = regexEnabled.checked ? parseRemovalRules(ruleEditor.value) : null;
             const key = progressKey(identity, includeUser.checked);
             const hashes = key ? messagePrefixHashes(context.chat) : [];
             const resumeExport = resume.checked;
@@ -197,6 +230,7 @@ function install() {
             const rendered = captureRenderedMessages(document.getElementById('chat'), new Set(snapshot.messages.map(message => message.index)));
             const settings = context.extensionSettings?.['st-chatu8'] || {};
             const splitExport = split.checked;
+            if (rules) regexFilter = createRegexFilter(rules, signal);
             for await (const result of buildArchiveParts(snapshot, {
                 rendered,
                 format: (raw, message) => {
@@ -212,6 +246,7 @@ function install() {
                 substitute: value => value.includes('{{') ? (context.substituteParams?.(value) ?? value) : value,
                 external: external.checked,
                 split: splitExport,
+                regexFilter,
                 signal,
                 onProgress({ done, total }) {
                     changed();
@@ -254,12 +289,16 @@ function install() {
             }
         } catch (error) {
             clearResult(3000);
-            status.textContent = signal.aborted ? '已取消导出。' : '导出未完成。请刷新酒馆后重试。';
+            if (signal.aborted) status.textContent = '已取消导出。';
+            else if (error instanceof RegexFilterError) status.textContent = error.message;
+            else status.textContent = '导出未完成。请刷新酒馆后重试。';
             if (!signal.aborted) console.warn('[ST HTML Export] Export failed:', error?.name || 'Error');
         } finally {
+            regexFilter?.close();
             if (subscribe) context.eventSource.removeListener(chatChanged, changed);
             controller = null;
             start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = false;
+            regexEnabled.disabled = ruleEditor.disabled = false;
             progress.hidden = cancel.hidden = true;
         }
     });

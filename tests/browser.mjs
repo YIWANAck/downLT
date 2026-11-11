@@ -11,7 +11,7 @@ const staticFiles = new Map([
     ['/', ['tests/fixture.html', 'text/html; charset=utf-8']],
     ['/fixture.js', ['tests/fixture.js', 'text/javascript; charset=utf-8']],
     ['/dompurify.mjs', ['node_modules/dompurify/dist/purify.es.mjs', 'text/javascript']],
-    ...['index.js', 'document.js', 'render.js', 'model.js', 'chatu8.js', 'assets.js', 'style.css']
+    ...['index.js', 'document.js', 'render.js', 'model.js', 'chatu8.js', 'assets.js', 'regex-filter.js', 'regex-worker.js', 'style.css']
         .map(file => [prefix + file, [file, file.endsWith('.css') ? 'text/css' : 'text/javascript; charset=utf-8']]),
 ]);
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ3sAAAAASUVORK5CYII=', 'base64');
@@ -84,6 +84,7 @@ try {
     assert.ok(!text.includes('blob:'));
     assert.ok(!text.includes('/user/images/test.png'));
     assert.ok(text.includes('普通图片附件'));
+    assert.ok(text.includes('原文思考') && text.includes('页面选项'));
 
     await includeUser.uncheck();
     await page.getByRole('button', { name: '生成 HTML' }).click();
@@ -95,6 +96,27 @@ try {
     assert.ok(filtered.includes('嵌入状态栏'));
     assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
     await includeUser.check();
+
+    const regexToggle = page.getByRole('checkbox', { name: '用正则移除导出内容' });
+    assert.equal(await regexToggle.isChecked(), false);
+    await regexToggle.check();
+    const editor = page.getByRole('textbox', { name: '要移除的内容' });
+    const exampleRules = await editor.inputValue();
+    await editor.fill('/[/g');
+    await page.getByRole('button', { name: '生成 HTML' }).click();
+    assert.match(await page.getByRole('status').textContent(), /第 1 行的正则表达式或标志无效/);
+    await editor.fill(exampleRules + '\n/第 13 条消息/g');
+    await page.getByRole('button', { name: '生成 HTML' }).click();
+    await filteredLink.waitFor({ timeout: 12000 });
+    const cleaned = await filteredLink.evaluate(async link => (await fetch(link.href)).text());
+    for (const removed of ['原文思考', '第二行思考', '原文选项', '页面选项', '第 13 条消息']) {
+        assert.ok(!cleaned.includes(removed), removed);
+    }
+    assert.ok(cleaned.includes('前文') && cleaned.includes('嵌入状态栏'));
+    assert.ok(cleaned.includes(expected[0]) && cleaned.includes(expected[1]));
+    assert.match(await page.getByRole('status').textContent(), /32 条消息、9 项媒体/);
+    assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
+    await regexToggle.uncheck();
 
     // An export can be cancelled while waiting for a slow image.
     await page.evaluate(() => {
@@ -232,7 +254,7 @@ try {
     assert.match(await resumedLink.getAttribute('download'), /消息34-34\.html$/);
     assert.match(await splitPage.getByRole('status').textContent(), /本文件有 1 条消息/);
     await writeFile(path.join(results, 'result.txt'), 'PASS: Full chat, server + IndexedDB + live iframe images, selection, ordering, sanitation, cancellation, offline decoding, mobile layout.\n');
-    console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads, incremental export`);
+    console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads, incremental export, regex filtering`);
 } finally {
     await browser?.close();
     server.closeAllConnections();
