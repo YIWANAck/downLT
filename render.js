@@ -43,11 +43,12 @@ function cloneRendered(source, inertDocument, depth = 0) {
     return copy;
 }
 
-export function captureRenderedMessages(chatElement) {
+export function captureRenderedMessages(chatElement, indices) {
     const rendered = new Map();
     const inertDocument = document.implementation.createHTMLDocument('');
     for (const node of chatElement?.querySelectorAll(':scope > .mes[mesid]') || []) {
         const index = Number(node.getAttribute('mesid'));
+        if (indices && !indices.has(index)) continue;
         const content = node.querySelector('.mes_text');
         if (Number.isInteger(index) && content?.childNodes.length) rendered.set(index, cloneRendered(content, inertDocument).innerHTML);
     }

@@ -141,6 +141,7 @@ try {
     }));
     await splitPage.goto(url);
     await splitPage.waitForFunction(() => globalThis.fixtureReady === true, null, { timeout: 12000 });
+    await splitPage.evaluate(() => { testValues.context.chatId = '分段续导测试'; });
     await splitPage.locator('#sthe-export-menu').click();
     await splitPage.getByRole('checkbox', { name: /自动分段导出/ }).check();
     await splitPage.getByRole('button', { name: '生成 HTML' }).click();
@@ -168,6 +169,9 @@ try {
         const pending = splitPage.waitForEvent('download');
         await link.click();
         assert.ok((await pending).suggestedFilename().endsWith(`-${String(part).padStart(3, '0')}.html`));
+        assert.ok(await splitPage.evaluate(end => Object.keys(localStorage).some(key => (
+            key.startsWith('st-html-export.progress.') && JSON.parse(localStorage.getItem(key)).end === end
+        )), combinedMessages.length));
         if (!await more.isVisible()) break;
         await more.click();
     }
@@ -193,8 +197,42 @@ try {
         return results;
     }, { modulePrefix: prefix });
     assert.deepEqual(wholeMessage, [[1, 3, 0], [1, 4, 0]]);
+
+    await splitPage.evaluate(() => {
+        testValues.context.chat.push(
+            { name: '我', mes: '导出之后我继续聊天了。', is_user: true },
+            { name: '旅人', mes: '这是新增回复。' },
+        );
+    });
+    await splitPage.getByRole('checkbox', { name: /自动分段导出/ }).uncheck();
+    const resume = splitPage.getByRole('checkbox', { name: '只导出上次之后的消息' });
+    await resume.check();
+    assert.match(await splitPage.locator('.sthe-resume-hint').textContent(), /第 32 条/);
+    const generate = splitPage.getByRole('button', { name: '生成 HTML' });
+    const resumedLink = splitPage.getByRole('link', { name: '下载 HTML' });
+    await generate.click();
+    await resumedLink.waitFor({ timeout: 12000 });
+    assert.match(await resumedLink.getAttribute('download'), /消息33-34\.html$/);
+    const resumed = await resumedLink.evaluate(async link => (await fetch(link.href)).text());
+    assert.ok(resumed.includes('这是新增回复。') && resumed.includes('导出之后我继续聊天了。'));
+    assert.ok(!resumed.includes('嵌入状态栏'));
+    const resumedDownload = splitPage.waitForEvent('download');
+    await resumedLink.click();
+    await resumedDownload;
+    await generate.click();
+    assert.match(await splitPage.getByRole('status').textContent(), /没有符合当前选项的新消息/);
+
+    await splitPage.evaluate(() => { testValues.context.chat[0].mes = '已编辑的旧消息'; });
+    await generate.click();
+    assert.match(await splitPage.getByRole('status').textContent(), /上次导出前的消息有变动/);
+    assert.equal(await resumedLink.count(), 0);
+    await splitPage.getByRole('spinbutton', { name: '从第几条消息开始' }).fill('34');
+    await generate.click();
+    await resumedLink.waitFor({ timeout: 12000 });
+    assert.match(await resumedLink.getAttribute('download'), /消息34-34\.html$/);
+    assert.match(await splitPage.getByRole('status').textContent(), /本文件有 1 条消息/);
     await writeFile(path.join(results, 'result.txt'), 'PASS: Full chat, server + IndexedDB + live iframe images, selection, ordering, sanitation, cancellation, offline decoding, mobile layout.\n');
-    console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads`);
+    console.log(`PASS: full chat, selected cache images, placement, cancellation, offline mobile rendering, ${partCount} split downloads, incremental export`);
 } finally {
     await browser?.close();
     server.closeAllConnections();

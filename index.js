@@ -1,5 +1,5 @@
 import { DOMPurify } from '../../../../lib.js';
-import { snapshotChat } from './model.js';
+import { chatIdentity, md5, messagePrefixHashes, snapshotChat } from './model.js';
 import { captureRenderedMessages } from './render.js';
 import { buildArchiveParts } from './document.js';
 import { describeMediaFailures } from './assets.js';
@@ -7,6 +7,19 @@ import { describeMediaFailures } from './assets.js';
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
 const INCLUDE_USER_SETTING = 'st-html-export.include-user';
+
+function progressKey(identity, includeUser) {
+    return identity && `st-html-export.progress.v1:${md5(JSON.stringify([identity, includeUser]))}`;
+}
+
+function readProgress(key) {
+    if (!key) return null;
+    try {
+        const value = JSON.parse(localStorage.getItem(key));
+        if (Number.isSafeInteger(value?.end) && value.end > 0 && /^[a-f0-9]{32}$/.test(value.hash)) return value;
+    } catch { /* No usable saved progress. */ }
+    return null;
+}
 
 function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -39,6 +52,21 @@ function install() {
     try { includeUser.checked = localStorage.getItem(INCLUDE_USER_SETTING) !== 'false'; }
     catch { /* Storage may be disabled. */ }
     userOption.append(includeUser, '包含我的消息');
+    const resumeOption = element('label', 'sthe-option');
+    const resume = element('input');
+    resume.type = 'checkbox';
+    resumeOption.append(resume, '只导出上次之后的消息');
+    const resumeFields = element('div', 'sthe-resume-fields');
+    resumeFields.hidden = true;
+    const fromLabel = element('label', 'sthe-option', '从第几条消息开始');
+    const from = element('input');
+    from.type = 'number';
+    from.min = '1';
+    from.step = '1';
+    from.placeholder = '留空自动接续';
+    fromLabel.append(from);
+    const resumeHint = element('p', 'sthe-resume-hint');
+    resumeFields.append(fromLabel, resumeHint);
     const splitOption = element('label', 'sthe-option');
     const split = element('input');
     split.type = 'checkbox';
@@ -63,11 +91,12 @@ function install() {
     next.type = 'button';
     next.hidden = true;
     actions.append(start, cancel, download, next);
-    dialog.append(header, info, userOption, splitOption, option, progress, status, actions);
+    dialog.append(header, info, userOption, resumeOption, resumeFields, splitOption, option, progress, status, actions);
     document.body.append(dialog);
 
     let controller = null;
     let resultUrl = null;
+    let recordDownload = null;
     function clearResult(delay = 0) {
         if (resultUrl) {
             const oldUrl = resultUrl;
@@ -75,9 +104,18 @@ function install() {
             else URL.revokeObjectURL(oldUrl);
         }
         resultUrl = null;
+        recordDownload = null;
         download.hidden = next.hidden = true;
         download.removeAttribute('href');
     }
+    function updateResumeHint() {
+        const saved = readProgress(progressKey(chatIdentity(getContext()), includeUser.checked));
+        resumeHint.textContent = saved
+            ? `已记录到原聊天第 ${saved.end} 条。留空从第 ${saved.end + 1} 条开始。`
+            : '当前聊天没有可用的下载进度。旧版导过的话，可以填下一条消息的编号，从 1 开始数，包含你发的消息。';
+    }
+
+    download.addEventListener('click', () => recordDownload?.());
     function waitForNextPart(signal) {
         signal.throwIfAborted();
         return new Promise((resolve, reject) => {
@@ -101,7 +139,15 @@ function install() {
         catch { /* The choice still applies to this page. */ }
         clearResult();
         status.textContent = '';
+        if (resume.checked) updateResumeHint();
     });
+    resume.addEventListener('change', () => {
+        resumeFields.hidden = !resume.checked;
+        if (resume.checked) updateResumeHint();
+        clearResult();
+        status.textContent = '';
+    });
+    from.addEventListener('input', () => { clearResult(); status.textContent = ''; });
     split.addEventListener('change', () => { clearResult(); status.textContent = ''; });
     close.addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => {
@@ -116,21 +162,39 @@ function install() {
         clearResult();
         controller = new AbortController();
         const { signal } = controller;
-        start.disabled = includeUser.disabled = split.disabled = external.disabled = true;
+        start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = true;
         progress.hidden = cancel.hidden = false;
         progress.value = 0;
         status.textContent = '正在读取消息和图片…';
-        const getId = ctx => [ctx.getCurrentChatId?.() ?? ctx.chatId, ctx.characterId, ctx.groupId].join('\u0000');
-        const identity = getId(context);
-        const changed = () => { if (getId(getContext()) !== identity) controller?.abort(); };
+        const identity = chatIdentity(context);
+        const changed = () => { if (chatIdentity(getContext()) !== identity) controller?.abort(); };
         const chatChanged = context.eventTypes?.CHAT_CHANGED || context.event_types?.CHAT_CHANGED;
         const subscribe = chatChanged && typeof context.eventSource?.removeListener === 'function';
         if (subscribe) context.eventSource.on(chatChanged, changed);
         try {
-            const snapshot = snapshotChat(context, { includeUser: includeUser.checked });
-            if (!snapshot.messages.length) { status.textContent = '没有符合当前选项的消息。'; return; }
+            const key = progressKey(identity, includeUser.checked);
+            const hashes = key ? messagePrefixHashes(context.chat) : [];
+            const resumeExport = resume.checked;
+            let startIndex = 0;
+            if (resumeExport) {
+                if (from.validity.badInput || (from.value !== '' && (!Number.isSafeInteger(from.valueAsNumber) || from.valueAsNumber < 1 || from.valueAsNumber > context.chat.length))) {
+                    status.textContent = `请输入 1 到 ${context.chat.length} 之间的消息编号。`;
+                    return;
+                }
+                if (from.value !== '') startIndex = from.valueAsNumber - 1;
+                else {
+                    const saved = readProgress(key);
+                    if (!saved || hashes[saved.end] !== saved.hash) {
+                        status.textContent = saved ? '上次导出前的消息有变动。请填写起点，或取消勾选后完整导出。' : '还没有这段聊天的下载进度。请填写起点，或取消勾选后完整导出。';
+                        return;
+                    }
+                    startIndex = saved.end;
+                }
+            }
+            const snapshot = snapshotChat(context, { includeUser: includeUser.checked, startIndex });
+            if (!snapshot.messages.length) { status.textContent = resumeExport ? '没有符合当前选项的新消息。' : '没有符合当前选项的消息。'; return; }
             progress.max = snapshot.messages.length;
-            const rendered = captureRenderedMessages(document.getElementById('chat'));
+            const rendered = captureRenderedMessages(document.getElementById('chat'), new Set(snapshot.messages.map(message => message.index)));
             const settings = context.extensionSettings?.['st-chatu8'] || {};
             const splitExport = split.checked;
             for await (const result of buildArchiveParts(snapshot, {
@@ -159,7 +223,19 @@ function install() {
                 const { blob, stats, part, count, done, total, more, filename } = result;
                 resultUrl = URL.createObjectURL(blob);
                 download.href = resultUrl;
-                download.download = filename;
+                const first = snapshot.messages[done - count].index + 1;
+                const end = snapshot.messages[done - 1].index + 1;
+                download.download = resumeExport ? `${filename.slice(0, -5)}-消息${first}-${end}.html` : filename;
+                recordDownload = key ? () => {
+                    recordDownload = null;
+                    try {
+                        const previous = readProgress(key);
+                        if (!previous || previous.end <= end || hashes[previous.end] !== previous.hash) {
+                            localStorage.setItem(key, JSON.stringify({ end, hash: hashes[end] }));
+                        }
+                        if (resumeExport) { from.value = ''; updateResumeHint(); }
+                    } catch { status.textContent += ' 浏览器无法记录本次下载进度。'; }
+                } : null;
                 download.textContent = splitExport ? `下载第 ${part} 段` : '下载 HTML';
                 download.hidden = false;
                 const size = blob.size >= 1048576 ? `${(blob.size / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(blob.size / 1024))} KB`;
@@ -183,13 +259,18 @@ function install() {
         } finally {
             if (subscribe) context.eventSource.removeListener(chatChanged, changed);
             controller = null;
-            start.disabled = includeUser.disabled = split.disabled = external.disabled = false;
+            start.disabled = includeUser.disabled = resume.disabled = from.disabled = split.disabled = external.disabled = false;
             progress.hidden = cancel.hidden = true;
         }
     });
 
     function show() {
-        if (!controller) status.textContent = '';
+        if (!controller) {
+            status.textContent = '';
+            resume.checked = false;
+            resumeFields.hidden = true;
+            from.value = '';
+        }
         if (!dialog.open) dialog.showModal();
     }
     if (menu) {

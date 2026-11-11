@@ -88,11 +88,29 @@ export function nativeMedia(extra) {
     return urls.filter(item => typeof item.url === 'string' && item.url);
 }
 
-export function snapshotChat(context, { includeUser = true } = {}) {
+export function chatIdentity(context) {
+    const chatId = context.getCurrentChatId?.() ?? context.chatId;
+    if (chatId === undefined || chatId === null || chatId === '') return null;
+    const group = context.groupId;
+    const character = context.characters?.[context.characterId]?.avatar ?? context.characterId;
+    return JSON.stringify(group ? ['group', group, chatId] : ['character', character, chatId]);
+}
+
+export function messagePrefixHashes(chat) {
+    const hashes = [''];
+    for (const message of chat) {
+        const fields = [message.name, message.send_date, message.is_user, message.is_system, message.swipe_id ?? 0, message.mes];
+        hashes.push(md5(hashes.at(-1) + JSON.stringify(fields)));
+    }
+    return hashes;
+}
+
+export function snapshotChat(context, { includeUser = true, startIndex = 0 } = {}) {
     const title = String(context.getCurrentChatId?.() || context.chatId || context.name2 || '聊天记录');
     const groups = context.chatMetadata?.['st-chatu8']?.data?.image_groups;
     const messages = [];
-    for (const [index, message] of context.chat.entries()) {
+    for (let index = startIndex; index < context.chat.length; index++) {
+        const message = context.chat[index];
         if (!includeUser && message.is_user) continue;
         const extra = message.extra || {};
         messages.push({

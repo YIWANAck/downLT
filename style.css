@@ -19,6 +19,9 @@
 .sthe-dialog p { margin: 12px 0; line-height: 1.5; }
 .sthe-dialog .menu_button { min-height: 38px; width: auto; margin: 0; padding: 6px 11px; }
 .sthe-option { display: flex; align-items: center; gap: 7px; font-size: .9em; }
+.sthe-resume-fields { margin: 6px 0 10px 22px; }
+.sthe-resume-fields input { min-width: 0; width: 9em; }
+.sthe-dialog .sthe-resume-hint { margin: 5px 0 0; font-size: .82em; }
 .sthe-progress { width: 100%; margin-top: 14px; }
 .sthe-status:empty { display: none; }
 .sthe-actions { justify-content: flex-end; margin-top: 16px; }
