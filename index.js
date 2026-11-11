@@ -5,6 +5,7 @@ import { buildArchive, fileName } from './document.js';
 
 const getContext = () => globalThis.SillyTavern.getContext();
 const sanitizer = DOMPurify(window);
+const INCLUDE_USER_SETTING = 'st-html-export.include-user';
 
 function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -29,7 +30,14 @@ function install() {
     close.type = 'button';
     header.append(title, close);
 
-    const info = element('p', null, '保存当前聊天的全部消息和可用插图。导出文件可离线打开。');
+    const info = element('p', null, '保存当前聊天和可用插图。导出文件可离线打开。');
+    const userOption = element('label', 'sthe-option');
+    const includeUser = element('input');
+    includeUser.type = 'checkbox';
+    includeUser.checked = true;
+    try { includeUser.checked = localStorage.getItem(INCLUDE_USER_SETTING) !== 'false'; }
+    catch { /* Storage may be disabled. */ }
+    userOption.append(includeUser, '包含我的消息');
     const option = element('label', 'sthe-option');
     const external = element('input');
     external.type = 'checkbox';
@@ -47,7 +55,7 @@ function install() {
     const download = element('a', 'menu_button sthe-download', '下载 HTML');
     download.hidden = true;
     actions.append(start, cancel, download);
-    dialog.append(header, info, option, progress, status, actions);
+    dialog.append(header, info, userOption, option, progress, status, actions);
     document.body.append(dialog);
 
     let controller = null;
@@ -62,6 +70,12 @@ function install() {
         download.hidden = true;
         download.removeAttribute('href');
     }
+    includeUser.addEventListener('change', () => {
+        try { localStorage.setItem(INCLUDE_USER_SETTING, String(includeUser.checked)); }
+        catch { /* The choice still applies to this page. */ }
+        clearResult();
+        status.textContent = '';
+    });
     close.addEventListener('click', () => dialog.close());
     dialog.addEventListener('close', () => {
         controller?.abort();
@@ -75,10 +89,9 @@ function install() {
         clearResult();
         controller = new AbortController();
         const { signal } = controller;
-        start.disabled = external.disabled = true;
+        start.disabled = includeUser.disabled = external.disabled = true;
         progress.hidden = cancel.hidden = false;
         progress.value = 0;
-        progress.max = context.chat.length;
         status.textContent = '正在读取消息和图片…';
         const getId = ctx => [ctx.getCurrentChatId?.() ?? ctx.chatId, ctx.characterId, ctx.groupId].join('\u0000');
         const identity = getId(context);
@@ -87,7 +100,9 @@ function install() {
         const subscribe = chatChanged && typeof context.eventSource?.removeListener === 'function';
         if (subscribe) context.eventSource.on(chatChanged, changed);
         try {
-            const snapshot = snapshotChat(context);
+            const snapshot = snapshotChat(context, { includeUser: includeUser.checked });
+            if (!snapshot.messages.length) { status.textContent = '没有符合当前选项的消息。'; return; }
+            progress.max = snapshot.messages.length;
             const rendered = captureRenderedMessages(document.getElementById('chat'));
             const settings = context.extensionSettings?.['st-chatu8'] || {};
             const { blob, stats } = await buildArchive(snapshot, {
@@ -128,7 +143,7 @@ function install() {
         } finally {
             if (subscribe) context.eventSource.removeListener(chatChanged, changed);
             controller = null;
-            start.disabled = external.disabled = false;
+            start.disabled = includeUser.disabled = external.disabled = false;
             progress.hidden = cancel.hidden = true;
         }
     });

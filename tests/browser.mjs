@@ -56,6 +56,8 @@ try {
     await page.waitForFunction(() => globalThis.fixtureReady === true, null, { timeout: 12000 });
     const expected = await page.evaluate(() => [testValues.urlA, testValues.urlB, testValues.urlC]);
     await page.locator('#sthe-export-menu').click();
+    const includeUser = page.getByRole('checkbox', { name: '包含我的消息' });
+    assert.equal(await includeUser.isChecked(), true);
     await page.getByRole('button', { name: '生成 HTML' }).click();
     await page.getByRole('link', { name: '下载 HTML' }).waitFor({ timeout: 12000 });
     const status = await page.getByRole('status').textContent();
@@ -78,8 +80,20 @@ try {
     assert.ok(!text.includes('external.invalid'));
     assert.ok(!text.includes('blob:'));
     assert.ok(!text.includes('/user/images/test.png'));
+    assert.ok(text.includes('普通图片附件'));
 
-    // A second export can be cancelled while waiting for a slow image.
+    await includeUser.uncheck();
+    await page.getByRole('button', { name: '生成 HTML' }).click();
+    const filteredLink = page.getByRole('link', { name: '下载 HTML' });
+    await filteredLink.waitFor({ timeout: 12000 });
+    assert.match(await page.getByRole('status').textContent(), /31 条消息、8 项媒体/);
+    const filtered = await filteredLink.evaluate(async link => (await fetch(link.href)).text());
+    assert.ok(!filtered.includes('普通图片附件'));
+    assert.ok(filtered.includes('嵌入状态栏'));
+    assert.equal(await page.evaluate(() => JSON.stringify(testValues.context.chat) === testValues.chatBefore), true);
+    await includeUser.check();
+
+    // An export can be cancelled while waiting for a slow image.
     await page.evaluate(() => {
         testValues.context.chat[0].extra = { media: [{ type: 'image', url: '/user/images/slow.png' }] };
     });

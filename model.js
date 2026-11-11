@@ -88,12 +88,14 @@ export function nativeMedia(extra) {
     return urls.filter(item => typeof item.url === 'string' && item.url);
 }
 
-export function snapshotChat(context) {
+export function snapshotChat(context, { includeUser = true } = {}) {
     const title = String(context.getCurrentChatId?.() || context.chatId || context.name2 || '聊天记录');
     const groups = context.chatMetadata?.['st-chatu8']?.data?.image_groups;
-    const messages = Array.from(context.chat, (message, index) => {
+    const messages = [];
+    for (const [index, message] of context.chat.entries()) {
+        if (!includeUser && message.is_user) continue;
         const extra = message.extra || {};
-        return {
+        messages.push({
             index,
             name: String(message.name || (message.is_user ? context.name1 || '我' : context.name2 || '角色')),
             date: String(message.send_date ?? ''),
@@ -103,7 +105,7 @@ export function snapshotChat(context) {
             swipe_id: message.swipe_id ?? 0,
             extra: { images: extra.images ? structuredClone(extra.images) : undefined },
             attachments: nativeMedia(extra),
-        };
-    });
+        });
+    }
     return { title, messages, imageGroups: groups ? structuredClone(groups) : {} };
 }

@@ -46,6 +46,7 @@ chat[3].mes = '另一个故事';
 chat[4].mes = '需要恢复 image###lost###；文字仍可读。';
 chat[5].mes = '<p onclick="alert(1)">恶意标记测试 <a href="javascript:alert(1)">危险链接</a></p><script>alert(1)</script><img src="/api/settings/get" onerror="alert(1)"><img src="https://external.invalid/spy.png"><svg onload="alert(1)"><circle/></svg>';
 chat[6].mes = '<p>普通图片附件</p>';
+chat[6].is_user = true;
 chat[6].extra = { media: [{ type: 'image', url: '/user/images/test.png' }] };
 chat[7].mes = '<pre><code>image###code###</code></pre>';
 chat[8].mes = '<p>一张无定位插图。</p>';
